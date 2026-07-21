@@ -168,6 +168,8 @@ def test_activity_retry_action_is_clickable_and_csrf_protected(client):
     dashboard = client.get('/')
     assert b'action="/activity/retry-id/retry"' in dashboard.data
     assert b'>Retry</button>' in dashboard.data
+    assert b'<summary>View issue</summary>' in dashboard.data
+    assert b'temporary API failure' in dashboard.data
     assert client.post('/activity/retry-id/retry').status_code == 403
     response = client.post('/activity/retry-id/retry', data={'csrf': csrf(client)}, follow_redirects=True)
     assert response.status_code == 200
