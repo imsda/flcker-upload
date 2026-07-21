@@ -105,6 +105,12 @@ def test_drive_folder_browser_has_search_and_access_filters(client):
     assert b'data-folder-access="editable"' in response.data
 
 
+def test_hidden_filtered_folders_override_layout_display(client):
+    response = client.get('/static/css/app.css')
+    assert response.status_code == 200
+    assert b'[hidden]{display:none!important}' in response.data
+
+
 def test_inaccessible_folder_handling(client):
     with patch('drive_to_flickr.web.test_folder', side_effect=RuntimeError('forbidden')):
         response = client.post('/settings/google-drive/test', data={'csrf':csrf(client)}, follow_redirects=True)
