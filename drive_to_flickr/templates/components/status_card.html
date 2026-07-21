@@ -1,1 +1,5 @@
-<article class="status-card" id="{{ id|default('') }}"><div><p>{{ title }}</p><h3>{{ value }}</h3><small>{{ detail }}</small></div>{% set label=status %}{% set variant=variant %}{% include 'components/badge.html' %}</article>
+<article class="status-card" style="--card-accent:var(--imsda-{{ 'success' if variant == 'success' else 'warning' if variant == 'warning' else 'danger' if variant == 'danger' else 'info' }})" id="{{ id|default('') }}">
+  <div class="status-line"><span class="status-icon">{{ icon|default('●') }}</span>{% set label=status %}{% include 'components/badge.html' %}</div>
+  <div><p>{{ title }}</p><h3>{{ value }}</h3><small>{{ detail }}</small></div>
+  {% if href and action %}<a class="btn btn-sm" href="{{ href }}">{{ action }}</a>{% endif %}
+</article>

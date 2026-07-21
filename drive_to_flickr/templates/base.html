@@ -4,32 +4,33 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='imsda-20260721') }}">
 </head>
 <body>
 <div class="app-shell">
-  <aside class="sidebar" aria-label="Primary navigation">
-    <a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon">↗</span><span><strong>{{ app_name }}</strong><small>{{ app_subtitle }}</small></span></a>
-    <nav class="nav">
-      <a href="{{ url_for('dashboard') }}">Dashboard</a>
-      <p>Connections</p>
-      <a href="{{ url_for('google_account') }}">Google Account</a>
-      <a href="{{ url_for('drive_page') }}">Google Drive</a>
-      <a href="{{ url_for('calendar_page') }}">Google Calendar</a>
-      <a href="{{ url_for('flickr_page') }}">Flickr</a>
-      <p>Settings</p>
-      <a href="{{ url_for('settings_page') }}">General</a>
-      <a href="{{ url_for('setup') }}">Setup Wizard</a>
-      <p>System</p>
-      <a href="{{ url_for('dashboard') }}#activity">Logs / Activity</a>
-      <a href="{{ url_for('dashboard') }}#status">Status</a>
-    </nav>
-  </aside>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon">IM</span><span><strong>{{ app_name }}</strong><small>IMSDA · Automated Google Drive → Flickr Publishing</small></span></a>
+      <nav class="nav" aria-label="Primary navigation">
+        <div class="nav-group"><a class="{{ 'active' if request.endpoint == 'dashboard' else '' }}" href="{{ url_for('dashboard') }}">⌂ Dashboard</a></div>
+        <span class="nav-label">Connections</span>
+        <div class="nav-group">
+          <a class="{{ 'active' if request.endpoint == 'google_account' else '' }}" href="{{ url_for('google_account') }}">● Google Account</a>
+          <a class="{{ 'active' if request.endpoint == 'drive_page' else '' }}" href="{{ url_for('drive_page') }}">▣ Drive</a>
+          <a class="{{ 'active' if request.endpoint == 'calendar_page' else '' }}" href="{{ url_for('calendar_page') }}">◷ Calendar</a>
+          <a class="{{ 'active' if request.endpoint == 'flickr_page' else '' }}" href="{{ url_for('flickr_page') }}">◉ Flickr</a>
+        </div>
+        <span class="nav-label">Admin</span>
+        <div class="nav-group"><a class="{{ 'active' if request.endpoint == 'settings_page' else '' }}" href="{{ url_for('settings_page') }}">⚙ General</a><a class="{{ 'active' if request.endpoint == 'setup' else '' }}" href="{{ url_for('setup') }}">◆ Setup</a></div>
+      </nav>
+    </div>
+  </header>
   <main class="main">
-    <header class="topbar"><div><h1>{% block heading %}{{ app_name }}{% endblock %}</h1><p>{% block subheading %}{{ app_subtitle }}{% endblock %}</p></div></header>
+    <header class="topbar"><div><div class="eyebrow">IMSDA Admin Console</div><h1>{% block heading %}{{ app_name }}{% endblock %}</h1><p>{% block subheading %}{{ app_subtitle }}{% endblock %}</p></div>{% block header_actions %}{% endblock %}</header>
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<section class="flash-stack" aria-live="polite">{% for category, message in messages %}{% include 'components/alert.html' with context %}{% endfor %}</section>{% endif %}{% endwith %}
     {% block content %}{% endblock %}
   </main>
 </div>
+<script src="{{ url_for('static', filename='js/app.js', v='imsda-20260721') }}" defer></script>
 </body>
 </html>
