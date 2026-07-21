@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="Primary navigation">
+    <a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon">↗</span><span><strong>{{ app_name }}</strong><small>{{ app_subtitle }}</small></span></a>
+    <nav class="nav">
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <p>Connections</p>
+      <a href="{{ url_for('google_account') }}">Google Account</a>
+      <a href="{{ url_for('drive_page') }}">Google Drive</a>
+      <a href="{{ url_for('calendar_page') }}">Google Calendar</a>
+      <a href="{{ url_for('flickr_page') }}">Flickr</a>
+      <p>Settings</p>
+      <a href="{{ url_for('settings_page') }}">General</a>
+      <a href="{{ url_for('setup') }}">Setup Wizard</a>
+      <p>System</p>
+      <a href="{{ url_for('dashboard') }}#activity">Logs / Activity</a>
+      <a href="{{ url_for('dashboard') }}#status">Status</a>
+    </nav>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div><h1>{% block heading %}{{ app_name }}{% endblock %}</h1><p>{% block subheading %}{{ app_subtitle }}{% endblock %}</p></div></header>
+    {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<section class="flash-stack" aria-live="polite">{% for category, message in messages %}{% include 'components/alert.html' with context %}{% endfor %}</section>{% endif %}{% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>
