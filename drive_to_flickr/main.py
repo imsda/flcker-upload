@@ -13,11 +13,13 @@ from .config import load_settings
 from .database import Database
 from .drive import GoogleDriveClient
 from .flickr import FlickrClient
+from .google_ui import credentials as stored_google_credentials
 from .logging_config import configure_logging
 from .matcher import EventMatcher
 from .processor import Processor
 from .health import record_worker_heartbeat
 from .settings_store import SettingsStore
+from .secrets import SecretStore
 
 STOP = False
 
@@ -31,8 +33,10 @@ def build_processor(require_credentials: bool = True, flickr_required: bool = Tr
     settings = load_settings(require_credentials=require_credentials)
     configure_logging(settings.log_level)
     db = Database(settings.database_path)
-    drive = GoogleDriveClient(settings.google_credentials_file, settings.google_token_file)
-    calendar = GoogleCalendarClient(settings.google_credentials_file, settings.google_token_file, settings.timezone)
+    secret_store = SecretStore(settings.secret_store_path)
+    google_credentials = stored_google_credentials(secret_store) if secret_store.has("google_token_json") else None
+    drive = GoogleDriveClient(settings.google_credentials_file, settings.google_token_file, google_credentials)
+    calendar = GoogleCalendarClient(settings.google_credentials_file, settings.google_token_file, settings.timezone, google_credentials)
     flickr = FlickrClient(settings.flickr_api_key, settings.flickr_api_secret, settings.flickr_oauth_token, settings.flickr_oauth_token_secret) if flickr_required else None
     return Processor(settings, db, drive, calendar, flickr), db
 

@@ -1,8 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from drive_to_flickr.database import Database
+from drive_to_flickr.drive import GoogleDriveClient
+from drive_to_flickr.calendar import GoogleCalendarClient
 from drive_to_flickr.matcher import EventMatcher, normalize_album_name, parse_event_description
 from drive_to_flickr.metadata import parse_exif_datetime, choose_metadata_timestamp
 from drive_to_flickr.models import CalendarEvent, DriveFile, MediaKind
@@ -100,3 +103,18 @@ def test_worker_heartbeat_health_states(tmp_path: Path):
     assert worker_health(heartbeat, 120, current)["status"] == "Running"
     stale = (current - timedelta(minutes=10)).isoformat()
     assert worker_health(stale, 120, current)["status"] == "Stale"
+
+
+def test_google_clients_accept_web_oauth_credentials(tmp_path: Path):
+    supplied_credentials = Mock()
+    with patch('drive_to_flickr.drive.Credentials.from_authorized_user_file') as drive_legacy, \
+         patch('drive_to_flickr.drive.build') as drive_build:
+        GoogleDriveClient(tmp_path / 'client.json', tmp_path / 'missing-token.json', supplied_credentials)
+    drive_legacy.assert_not_called()
+    assert drive_build.call_args.kwargs['credentials'] is supplied_credentials
+
+    with patch('drive_to_flickr.calendar.Credentials.from_authorized_user_file') as calendar_legacy, \
+         patch('drive_to_flickr.calendar.build') as calendar_build:
+        GoogleCalendarClient(tmp_path / 'client.json', tmp_path / 'missing-token.json', TZ, supplied_credentials)
+    calendar_legacy.assert_not_called()
+    assert calendar_build.call_args.kwargs['credentials'] is supplied_credentials
