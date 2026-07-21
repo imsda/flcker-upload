@@ -57,7 +57,9 @@ def test_settings_persistence_and_validation(monkeypatch, tmp_path):
     db=Database(tmp_path/'state.sqlite'); store=SettingsStore(db)
     store.update({'TIMEZONE':'UTC','POLL_INTERVAL_SECONDS':'30','FLICKR_DEFAULT_PRIVACY':'public'})
     assert SettingsStore(Database(tmp_path/'state.sqlite')).get('POLL_INTERVAL_SECONDS') == '30'
+    assert store.all_public()['PUBLIC_BASE_URL'] == ''
     assert validate_settings({'TIMEZONE':'Nope/Bad','POLL_INTERVAL_SECONDS':'0','MINIMUM_FILE_AGE_SECONDS':'0','MAX_ATTEMPTS':'1','BUFFER_BEFORE_MINUTES':'0','BUFFER_AFTER_MINUTES':'0','FLICKR_DEFAULT_PRIVACY':'bad','NO_EVENT_ACTION':'skip','DRIVE_SUCCESS_ACTION':'leave'})
+    assert 'PUBLIC_BASE_URL must be a complete http:// or https:// URL' in validate_settings(store.all_public() | {'PUBLIC_BASE_URL': 'None'})
 
 
 def test_token_storage_redaction(tmp_path):
@@ -228,6 +230,10 @@ def test_setup_configuration_check_is_required_to_finish(client):
 
 
 def test_flickr_connection_workflow(client):
+    store = SettingsStore(Database(Path(__import__('os').environ['DATABASE_PATH'])))
+    store.set('PUBLIC_BASE_URL', 'https://flickerapp.internal.imsda.org')
+    page = client.get('/settings/flickr')
+    assert b'https://flickerapp.internal.imsda.org/oauth/flickr/callback' in page.data
     with patch('drive_to_flickr.web.OAuth1Session') as cls:
         inst=cls.return_value; inst.fetch_request_token.return_value={'oauth_token':'rt','oauth_token_secret':'rs'}; inst.authorization_url.return_value='https://flickr.example/auth'
         assert client.post('/settings/flickr/connect', data={'csrf':csrf(client)}).status_code == 302
