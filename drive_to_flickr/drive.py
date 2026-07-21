@@ -21,8 +21,8 @@ def parse_google_time(value: str) -> datetime:
 class GoogleDriveClient:
     """Direct Drive API client; avoids cloud filesystem polling issues and deprecated wrappers."""
 
-    def __init__(self, credentials_file: Path, token_file: Path) -> None:
-        creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+    def __init__(self, credentials_file: Path, token_file: Path, credentials: Credentials | None = None) -> None:
+        creds = credentials or Credentials.from_authorized_user_file(str(token_file), SCOPES)
         self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     @staticmethod

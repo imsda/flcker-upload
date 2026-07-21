@@ -149,7 +149,7 @@ sudo systemctl enable --now drive-to-flickr
 sudo journalctl -u drive-to-flickr -f
 ```
 
-The unit runs as `flickruploader`, uses `/opt/drive-to-flickr`, `/var/lib/drive-to-flickr`, and `/etc/drive-to-flickr`, and enables hardening such as `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, and `ProtectHome=true`.
+The provided unit uses `/opt/flcker-upload`, `/var/lib/drive-to-flickr`, and `/etc/drive-to-flickr`, and enables hardening such as `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, and `ProtectHome=true`. Adjust `User` and `Group` in the unit to match the account that owns the application and protected secret store on an existing deployment.
 
 ## Configuration
 

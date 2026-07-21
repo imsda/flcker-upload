@@ -16,8 +16,8 @@ SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
 
 class GoogleCalendarClient:
-    def __init__(self, credentials_file: Path, token_file: Path, timezone: ZoneInfo) -> None:
-        creds = Credentials.from_authorized_user_file(str(token_file), SCOPES + ["https://www.googleapis.com/auth/drive"])
+    def __init__(self, credentials_file: Path, token_file: Path, timezone: ZoneInfo, credentials: Credentials | None = None) -> None:
+        creds = credentials or Credentials.from_authorized_user_file(str(token_file), SCOPES + ["https://www.googleapis.com/auth/drive"])
         self.service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         self.timezone = timezone
 
