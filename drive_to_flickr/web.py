@@ -1,6 +1,7 @@
 """Authenticated web administration UI."""
 from __future__ import annotations
 
+import json
 import secrets as pysecrets
 from functools import wraps
 
@@ -13,6 +14,7 @@ from .config import load_settings
 from .database import Database, now
 from .flickr import ACCESS_TOKEN_URL, AUTHORIZE_URL, REQUEST_TOKEN_URL, FlickrClient
 from .google_ui import GoogleOAuthConfigError, account_email, configured as google_oauth_configured, flow_for, list_calendars, list_folders, test_calendar, test_folder
+from .health import worker_health
 from .models import Status
 from .secrets import SecretStore
 from .settings_store import SettingsStore, validate_settings
@@ -87,9 +89,14 @@ def create_app() -> Flask:
         vals = store.all_public()
         google_connected = secret_store.has("google_token_json")
         flickr_connected = secret_store.has("flickr_oauth_token")
+        try:
+            poll_interval = int(vals.get("POLL_INTERVAL_SECONDS", "120"))
+        except ValueError:
+            poll_interval = 120
+        health = worker_health(vals.get("WORKER_HEARTBEAT", ""), poll_interval)
         return {"vals": vals, "google_connected": google_connected, "flickr_connected": flickr_connected,
                 "drive_connected": bool(vals.get("GOOGLE_DRIVE_FOLDER_ID")), "calendar_connected": bool(vals.get("GOOGLE_CALENDAR_ID")),
-                "worker_status": "Running" if vals.get("WORKER_HEARTBEAT") else "Unknown"}
+                "worker_health": health}
 
     def upload_metrics() -> dict[str, int]:
         counts = {status: count for status, count in db.status_counts()}
@@ -111,7 +118,7 @@ def create_app() -> Flask:
         if not vals.get("GOOGLE_DRIVE_FOLDER_ID"): warnings.append({"title": "Drive Folder Missing", "message": "No Google Drive folder has been selected.", "detail": "Choose the Drive folder that Drive to Flickr should watch for new media.", "action": "Select Drive Folder", "href": url_for("drive_page")})
         if not vals.get("GOOGLE_CALENDAR_ID"): warnings.append({"title": "Calendar Missing", "message": "No Calendar has been selected.", "detail": "Select the Google Calendar used to map capture times to Flickr albums.", "action": "Select Calendar", "href": url_for("calendar_page")})
         if not d["flickr_connected"]: warnings.append({"title": "Flickr Disconnected", "message": "Flickr has not been connected.", "detail": "Connect Flickr so processed Drive media can be published to albums.", "action": "Connect Flickr", "href": url_for("flickr_page")})
-        if d["worker_status"] != "Running": warnings.append({"title": "Worker Status Unknown", "message": "Worker status is not confirmed as running.", "detail": "Restart or verify the background service if publishing has stopped.", "action": "View Status", "href": url_for("dashboard")})
+        if d["worker_health"]["status"] != "Running": warnings.append({"title": "Publisher Worker " + d["worker_health"]["status"], "message": "The publisher worker is not reporting as running.", "detail": "Start or restart the drive-to-flickr worker service. " + d["worker_health"]["detail"], "action": "", "href": ""})
         return warnings
 
     @app.get("/login")
@@ -306,18 +313,63 @@ def create_app() -> Flask:
     @app.get("/setup")
     @login_required
     def setup():
-        return render_template("setup/index.html", vals=store.all_public(), callback=google_callback_url(), app_configured=google_oauth_configured(secret_store, settings.google_credentials_file), google_connected=secret_store.has("google_token_json"), flickr_connected=secret_store.has("flickr_oauth_token"))
+        vals = store.all_public()
+        try:
+            test_results = json.loads(vals.get("SETUP_TEST_RESULTS", "[]"))
+        except (TypeError, ValueError):
+            test_results = []
+        return render_template("setup/index.html", vals=vals, callback=google_callback_url(), app_configured=google_oauth_configured(secret_store, settings.google_credentials_file), google_connected=secret_store.has("google_token_json"), flickr_connected=secret_store.has("flickr_oauth_token"), test_results=test_results)
 
     @app.post("/setup/finish")
     @login_required
     def setup_finish():
-        if not (secret_store.has("google_token_json") and store.get("GOOGLE_DRIVE_FOLDER_ID") and store.get("GOOGLE_CALENDAR_ID") and secret_store.has("flickr_oauth_token")):
-            flash("Setup cannot be marked complete until Google, Drive, Calendar, and Flickr are configured.", "error"); return redirect(url_for("setup"))
+        if not (secret_store.has("google_token_json") and store.get("GOOGLE_DRIVE_FOLDER_ID") and store.get("GOOGLE_CALENDAR_ID") and secret_store.has("flickr_oauth_token") and store.get("SETUP_LAST_TEST_STATUS") == "success"):
+            flash("Setup cannot be marked complete until Google, Drive, Calendar, and Flickr are configured and Test Configuration passes.", "error"); return redirect(url_for("setup"))
         store.set("SETUP_COMPLETE", "true"); flash("Setup complete", "success"); return redirect(url_for("dashboard"))
 
     @app.post("/setup/test-scan")
     @login_required
-    def setup_scan(): flash("Run `drive-to-flickr dry-run` on the server to perform a test scan.", "info"); return redirect(url_for("setup"))
+    def setup_scan():
+        vals = store.all_public()
+        results: list[dict[str, object]] = []
+
+        def check(name: str, fn, success_detail) -> None:
+            try:
+                value = fn()
+                detail = success_detail(value)
+                results.append({"name": name, "ok": True, "detail": detail})
+            except Exception as exc:
+                app.logger.warning("Setup check failed for %s: %s", name, exc)
+                results.append({"name": name, "ok": False, "detail": "Connection check failed. Review this service's settings and try again."})
+
+        if secret_store.has("google_token_json"):
+            check("Google Account", lambda: account_email(secret_store), lambda email: f"Connected as {email}")
+        else:
+            results.append({"name": "Google Account", "ok": False, "detail": "Connect a Google account first."})
+
+        folder_id = vals.get("GOOGLE_DRIVE_FOLDER_ID", "")
+        if folder_id:
+            check("Google Drive", lambda: test_folder(secret_store, folder_id), lambda meta: f"Folder accessible: {meta.get('name', folder_id)}")
+        else:
+            results.append({"name": "Google Drive", "ok": False, "detail": "Select a Drive folder first."})
+
+        calendar_id = vals.get("GOOGLE_CALENDAR_ID", "")
+        if calendar_id:
+            check("Google Calendar", lambda: test_calendar(secret_store, calendar_id), lambda meta: f"Calendar accessible: {meta.get('summary', calendar_id)}")
+        else:
+            results.append({"name": "Google Calendar", "ok": False, "detail": "Select a Calendar first."})
+
+        if secret_store.has("flickr_oauth_token"):
+            check("Flickr", lambda: FlickrClient(vals.get("FLICKR_API_KEY", ""), secret_store.get("flickr_api_secret"), secret_store.get("flickr_oauth_token"), secret_store.get("flickr_oauth_token_secret")).list_photosets(), lambda albums: f"Connection succeeded; {len(albums)} albums available.")
+        else:
+            results.append({"name": "Flickr", "ok": False, "detail": "Connect Flickr first."})
+
+        passed = all(bool(result["ok"]) for result in results)
+        store.set("SETUP_TEST_RESULTS", json.dumps(results))
+        store.set("SETUP_LAST_TEST_STATUS", "success" if passed else "failed")
+        store.set("SETUP_LAST_TEST_AT", now())
+        flash("All configuration checks passed." if passed else "Some configuration checks failed. Review the results below.", "success" if passed else "error")
+        return redirect(url_for("setup"))
 
     return app
 

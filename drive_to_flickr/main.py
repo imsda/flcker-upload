@@ -16,6 +16,8 @@ from .flickr import FlickrClient
 from .logging_config import configure_logging
 from .matcher import EventMatcher
 from .processor import Processor
+from .health import record_worker_heartbeat
+from .settings_store import SettingsStore
 
 STOP = False
 
@@ -60,12 +62,17 @@ def cmd_scan(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    proc, _ = build_processor(flickr_required=not args.dry_run)
+    proc, database = build_processor(flickr_required=not args.dry_run)
+    settings_store = SettingsStore(database)
     while not STOP:
+        record_worker_heartbeat(settings_store)
         proc.scan(dry_run=args.dry_run)
-        for _ in range(proc.settings.poll_interval_seconds):
+        record_worker_heartbeat(settings_store)
+        for elapsed in range(proc.settings.poll_interval_seconds):
             if STOP:
                 break
+            if elapsed and elapsed % 15 == 0:
+                record_worker_heartbeat(settings_store)
             time.sleep(1)
     return 0
 

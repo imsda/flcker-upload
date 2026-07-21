@@ -22,8 +22,10 @@ Normal application configuration is now managed in the authenticated web UI at `
 6. Select the Drive folder from My Drive, shared folders, or accessible Shared Drives.
 7. Select the Calendar from calendars visible in the authenticated account's Calendar list.
 8. Configure and connect Flickr.
-9. Run a test scan.
+9. Run **Test Configuration** to perform read-only access checks for Google Account, Drive, Calendar, and Flickr.
 10. Start the worker.
+
+The worker records a heartbeat in the application database while it runs. The dashboard reports it as **Running** when recent, **Stale** when the worker has stopped reporting, or **Not started** when no heartbeat has been recorded.
 
 The UI stores normal settings in SQLite and stores OAuth/API secrets separately in a filesystem-protected secret file. OAuth tokens are never displayed in HTML or JSON responses. Existing `GOOGLE_DRIVE_FOLDER_ID` and `GOOGLE_CALENDAR_ID` environment variables are still honored/imported for backward compatibility.
 

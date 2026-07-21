@@ -155,7 +155,49 @@ def test_disabled_calendar_api_is_shown_as_configuration_error(client):
 def test_configuration_health_and_wizard(client):
     assert b'Google Account Not Connected' in client.get('/').data
     data=client.get('/setup').data
-    assert b'First-run Setup Wizard' in data and b'Run Test Scan' in data
+    assert b'First-run Setup Wizard' in data and b'Test Configuration' in data
+
+
+def test_setup_configuration_check_reports_each_service(client):
+    connect_google_for_discovery()
+    db = Database(Path(__import__('os').environ['DATABASE_PATH']))
+    store = SettingsStore(db)
+    store.update({
+        'GOOGLE_DRIVE_FOLDER_ID': 'folder-id',
+        'GOOGLE_DRIVE_FOLDER_NAME': 'Uploads',
+        'GOOGLE_CALENDAR_ID': 'calendar-id',
+        'GOOGLE_CALENDAR_NAME': 'Albums',
+        'FLICKR_API_KEY': 'api-key',
+    })
+    secrets = SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH']))
+    secrets.set('flickr_api_secret', 'secret')
+    secrets.set('flickr_oauth_token', 'token')
+    secrets.set('flickr_oauth_token_secret', 'token-secret')
+    with patch('drive_to_flickr.web.account_email', return_value='photos@example.org'), \
+         patch('drive_to_flickr.web.test_folder', return_value={'name': 'Uploads'}), \
+         patch('drive_to_flickr.web.test_calendar', return_value={'summary': 'Albums'}), \
+         patch('drive_to_flickr.web.FlickrClient') as flickr:
+        flickr.return_value.list_photosets.return_value = {'one': ('1', 'One')}
+        response = client.post('/setup/test-scan', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert response.status_code == 200
+    assert b'All configuration checks passed' in response.data
+    assert b'Connected as photos@example.org' in response.data
+    assert b'Folder accessible: Uploads' in response.data
+    assert b'Calendar accessible: Albums' in response.data
+    assert b'1 albums available' in response.data
+    assert SettingsStore(db).get('SETUP_LAST_TEST_STATUS') == 'success'
+
+
+def test_setup_configuration_check_is_required_to_finish(client):
+    connect_google_for_discovery()
+    db = Database(Path(__import__('os').environ['DATABASE_PATH']))
+    store = SettingsStore(db)
+    store.set('GOOGLE_DRIVE_FOLDER_ID', 'folder-id')
+    store.set('GOOGLE_CALENDAR_ID', 'calendar-id')
+    SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH'])).set('flickr_oauth_token', 'token')
+    response = client.post('/setup/finish', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert b'Test Configuration passes' in response.data
+    assert store.get('SETUP_COMPLETE') != 'true'
 
 
 def test_flickr_connection_workflow(client):

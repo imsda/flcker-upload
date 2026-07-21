@@ -1,1 +1,65 @@
-{% extends 'base.html' %}{% block heading %}First-run Setup Wizard{% endblock %}{% block content %}{% set steps=[('General', true),('Google OAuth', app_configured),('Google Account', google_connected),('Google Drive', vals.get('GOOGLE_DRIVE_FOLDER_ID')),('Google Calendar', vals.get('GOOGLE_CALENDAR_ID')),('Flickr', flickr_connected),('Test', false),('Finish', vals.get('SETUP_COMPLETE')=='true')] %}<section class="card"><ol class="stepper">{% for name, done in steps %}<li class="{{ 'done' if done else 'todo' }}"><span>{{ '✓' if done else loop.index }}</span>{{ name }}</li>{% endfor %}</ol><div class="wizard-panel"><h2>Setup progress</h2><p>Complete each required connection before finishing. OAuth Callback URL: <code>{{ callback }}</code></p><div class="grid cards"><article class="metric"><span>Google</span><strong>{{ 'Connected' if google_connected else 'Not connected' }}</strong></article><article class="metric"><span>Drive</span><strong>{{ vals.get('GOOGLE_DRIVE_FOLDER_NAME') or 'Not selected' }}</strong></article><article class="metric"><span>Calendar</span><strong>{{ vals.get('GOOGLE_CALENDAR_NAME') or 'Not selected' }}</strong></article><article class="metric"><span>Flickr</span><strong>{{ 'Connected' if flickr_connected else 'Not connected' }}</strong></article></div><div class="actions"><a class="btn" href="{{ url_for('settings_page') }}">General</a><a class="btn" href="{{ url_for('google_account') }}">Google OAuth</a><a class="btn" href="{{ url_for('drive_page') }}">Google Drive</a><a class="btn" href="{{ url_for('calendar_page') }}">Google Calendar</a><a class="btn" href="{{ url_for('flickr_page') }}">Flickr</a></div><div class="actions"><form method="post" action="{{ url_for('setup_scan') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="btn">Run Test Scan</button></form><form method="post" action="{{ url_for('setup_finish') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="btn btn-primary">Finish</button></form></div></div></section>{% endblock %}
+{% extends 'base.html' %}
+{% block heading %}First-run Setup Wizard{% endblock %}
+{% block content %}
+{% set steps=[('General', true),('Google OAuth', app_configured),('Google Account', google_connected),('Google Drive', vals.get('GOOGLE_DRIVE_FOLDER_ID')),('Google Calendar', vals.get('GOOGLE_CALENDAR_ID')),('Flickr', flickr_connected),('Test', vals.get('SETUP_LAST_TEST_STATUS') == 'success'),('Finish', vals.get('SETUP_COMPLETE') == 'true')] %}
+<section class="card">
+  <ol class="stepper">
+    {% for name, done in steps %}
+    <li class="{{ 'done' if done else 'todo' }}"><span>{{ '✓' if done else loop.index }}</span>{{ name }}</li>
+    {% endfor %}
+  </ol>
+  <div class="wizard-panel">
+    <h2>Setup progress</h2>
+    <p>Complete each required connection before finishing. OAuth Callback URL: <code>{{ callback }}</code></p>
+    <div class="grid cards">
+      <article class="metric"><span>Google</span><strong>{{ 'Connected' if google_connected else 'Not connected' }}</strong></article>
+      <article class="metric"><span>Drive</span><strong>{{ vals.get('GOOGLE_DRIVE_FOLDER_NAME') or 'Not selected' }}</strong></article>
+      <article class="metric"><span>Calendar</span><strong>{{ vals.get('GOOGLE_CALENDAR_NAME') or 'Not selected' }}</strong></article>
+      <article class="metric"><span>Flickr</span><strong>{{ 'Connected' if flickr_connected else 'Not connected' }}</strong></article>
+    </div>
+    <div class="actions">
+      <a class="btn" href="{{ url_for('settings_page') }}">General</a>
+      <a class="btn" href="{{ url_for('google_account') }}">Google OAuth</a>
+      <a class="btn" href="{{ url_for('drive_page') }}">Google Drive</a>
+      <a class="btn" href="{{ url_for('calendar_page') }}">Google Calendar</a>
+      <a class="btn" href="{{ url_for('flickr_page') }}">Flickr</a>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h2>Test Configuration</h2>
+      <p class="help">Perform read-only checks against each connected service. This does not upload, move, download, or mark media as processed.</p>
+    </div>
+    <form method="post" action="{{ url_for('setup_scan') }}">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="btn btn-primary">Test Configuration</button>
+    </form>
+  </div>
+  {% if vals.get('SETUP_LAST_TEST_AT') %}<p class="help">Last tested: {{ vals.get('SETUP_LAST_TEST_AT') }}</p>{% endif %}
+  {% if test_results %}
+  <div class="grid cards setup-test-results">
+    {% for result in test_results %}
+    <article class="connection-check {{ 'check-success' if result.ok else 'check-error' }}">
+      <span class="check-icon" aria-hidden="true">{{ '✓' if result.ok else '!' }}</span>
+      <div><h3>{{ result.name }}</h3><p>{{ result.detail }}</p></div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">Run Test Configuration to verify Google Account, Drive, Calendar, and Flickr access.</div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <div><h2>Finish Setup</h2><p class="help">Mark setup complete after every required connection and configuration check passes.</p></div>
+    <form method="post" action="{{ url_for('setup_finish') }}">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="btn btn-primary">Finish</button>
+    </form>
+  </div>
+</section>
+{% endblock %}
