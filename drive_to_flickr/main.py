@@ -106,6 +106,11 @@ def cmd_test_drive(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(_: argparse.Namespace) -> int:
+    from .web import main as web_main
+    web_main()
+    return 0
+
 def cmd_test_flickr(_: argparse.Namespace) -> int:
     settings = load_settings()
     flickr = FlickrClient(settings.flickr_api_key, settings.flickr_api_secret, settings.flickr_oauth_token, settings.flickr_oauth_token_secret)
@@ -121,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--dry-run", action="store_true", default=name == "dry-run")
         p.set_defaults(func=fn)
-    simple_commands: dict[str, Callable[[argparse.Namespace], int]] = {"status": cmd_status, "retry": cmd_scan, "reconcile": cmd_reconcile, "test-drive": cmd_test_drive, "test-flickr": cmd_test_flickr, "auth-google": cmd_auth_google, "auth-flickr": cmd_auth_flickr}
+    simple_commands: dict[str, Callable[[argparse.Namespace], int]] = {"status": cmd_status, "retry": cmd_scan, "reconcile": cmd_reconcile, "test-drive": cmd_test_drive, "test-flickr": cmd_test_flickr, "auth-google": cmd_auth_google, "auth-flickr": cmd_auth_flickr, "web": cmd_web}
     for name, fn in simple_commands.items():
         p = sub.add_parser(name)
         p.set_defaults(func=fn)

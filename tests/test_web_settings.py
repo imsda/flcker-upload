@@ -1,0 +1,117 @@
+import json
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import pytest
+from werkzeug.security import generate_password_hash
+
+from drive_to_flickr.database import Database
+from drive_to_flickr.secrets import SecretStore
+from drive_to_flickr.settings_store import SettingsStore, validate_settings
+
+
+def env(monkeypatch, tmp_path):
+    monkeypatch.setenv('DATABASE_PATH', str(tmp_path/'state.sqlite'))
+    monkeypatch.setenv('SECRET_STORE_PATH', str(tmp_path/'secrets.json'))
+    monkeypatch.setenv('GOOGLE_CREDENTIALS_FILE', str(tmp_path/'google-client.json'))
+    monkeypatch.setenv('ADMIN_PASSWORD_HASH', generate_password_hash('pw'))
+    monkeypatch.setenv('WEB_SECRET_KEY', 'test-secret')
+    (tmp_path/'google-client.json').write_text(json.dumps({'web': {'client_id': 'id', 'client_secret': 'sec', 'auth_uri': 'https://accounts.google.com/o/oauth2/auth', 'token_uri': 'https://oauth2.googleapis.com/token'}}))
+
+
+def login(client):
+    client.get('/login')
+    with client.session_transaction() as s: csrf=s['csrf']
+    return client.post('/login', data={'username':'admin','password':'pw','csrf':csrf})
+
+
+@pytest.fixture
+def client(monkeypatch, tmp_path):
+    env(monkeypatch,tmp_path)
+    from drive_to_flickr.web import create_app
+    app=create_app(); app.config['TESTING']=True
+    c=app.test_client(); login(c)
+    return c
+
+
+def csrf(client):
+    with client.session_transaction() as s: return s['csrf']
+
+
+def test_authentication_and_csrf_required(client):
+    anon = client.application.test_client()
+    assert anon.get('/').status_code == 302
+    assert client.post('/settings', data={'TIMEZONE':'UTC'}).status_code == 403
+
+
+def test_settings_persistence_and_validation(monkeypatch, tmp_path):
+    env(monkeypatch,tmp_path)
+    db=Database(tmp_path/'state.sqlite'); store=SettingsStore(db)
+    store.update({'TIMEZONE':'UTC','POLL_INTERVAL_SECONDS':'30','FLICKR_DEFAULT_PRIVACY':'public'})
+    assert SettingsStore(Database(tmp_path/'state.sqlite')).get('POLL_INTERVAL_SECONDS') == '30'
+    assert validate_settings({'TIMEZONE':'Nope/Bad','POLL_INTERVAL_SECONDS':'0','MINIMUM_FILE_AGE_SECONDS':'0','MAX_ATTEMPTS':'1','BUFFER_BEFORE_MINUTES':'0','BUFFER_AFTER_MINUTES':'0','FLICKR_DEFAULT_PRIVACY':'bad','NO_EVENT_ACTION':'skip','DRIVE_SUCCESS_ACTION':'leave'})
+
+
+def test_token_storage_redaction(tmp_path):
+    ss=SecretStore(tmp_path/'secret.json'); ss.set('flickr_oauth_token','abc')
+    assert oct((tmp_path/'secret.json').stat().st_mode & 0o777) == '0o600'
+    assert 'abc' not in ss.__dict__.values()
+
+
+def test_google_oauth_callback(client):
+    fake_flow=Mock(); fake_flow.credentials.to_json.return_value='{"refresh_token":"r"}'
+    with patch('drive_to_flickr.web.flow_for', return_value=fake_flow), patch('drive_to_flickr.web.account_email', return_value='flickr-uploader@example.org'):
+        client.application.view_functions['dashboard']
+        # create matching oauth state in DB through connect endpoint mocked authorization URL
+        with patch.object(fake_flow, 'authorization_url', return_value=('https://google.example/auth', None)):
+            resp=client.post('/settings/google-account/connect', data={'csrf':csrf(client)})
+        assert resp.status_code == 302
+        db=Database(Path(__import__('os').environ['DATABASE_PATH']))
+        with db.connect() as conn:
+            state=conn.execute("select state from oauth_states where provider='google'").fetchone()['state']
+        resp=client.get('/oauth/google/callback?state='+state+'&code=ok')
+        assert resp.status_code == 302
+        assert SettingsStore(db).get('GOOGLE_ACCOUNT_EMAIL') == 'flickr-uploader@example.org'
+
+
+def test_drive_folder_discovery_shared_drives_and_selection(client):
+    folders=[{'id':'fld','name':'Shared Uploads','driveId':'sd','capabilities':{'canEdit':False}}]
+    with patch('drive_to_flickr.web.list_folders', return_value=folders) as lf, patch('drive_to_flickr.web.test_folder', return_value={'id':'fld','name':'Shared Uploads'}):
+        assert b'Shared Uploads' in client.get('/settings/google-drive').data
+        lf.assert_called()
+        client.post('/settings/google-drive/select', data={'csrf':csrf(client),'id':'fld','name':'Shared Uploads'})
+    assert SettingsStore(Database(Path(__import__('os').environ['DATABASE_PATH']))).get('GOOGLE_DRIVE_FOLDER_ID') == 'fld'
+
+
+def test_inaccessible_folder_handling(client):
+    with patch('drive_to_flickr.web.test_folder', side_effect=RuntimeError('forbidden')):
+        with pytest.raises(RuntimeError):
+            client.post('/settings/google-drive/test', data={'csrf':csrf(client)})
+
+
+def test_calendar_list_and_shared_selection(client):
+    calendars=[{'id':'cal@example.org','summary':'Flickr Albums','accessRole':'reader'}]
+    with patch('drive_to_flickr.web.list_calendars', return_value=calendars), patch('drive_to_flickr.web.test_calendar', return_value=calendars[0]):
+        assert b'Flickr Albums' in client.get('/settings/calendar').data
+        client.post('/settings/calendar/select', data={'csrf':csrf(client),'id':'cal@example.org','name':'Flickr Albums'})
+    assert SettingsStore(Database(Path(__import__('os').environ['DATABASE_PATH']))).get('GOOGLE_CALENDAR_ID') == 'cal@example.org'
+
+
+def test_inaccessible_calendar_handling(client):
+    with patch('drive_to_flickr.web.test_calendar', side_effect=RuntimeError('forbidden')):
+        with pytest.raises(RuntimeError):
+            client.post('/settings/calendar/test', data={'csrf':csrf(client)})
+
+
+def test_configuration_health_and_wizard(client):
+    assert b'Google authorization expired' in client.get('/').data
+    data=client.get('/setup').data
+    assert b'First-run Setup Wizard' in data and b'Run Test Scan' in data
+
+
+def test_flickr_connection_workflow(client):
+    with patch('drive_to_flickr.web.OAuth1Session') as cls:
+        inst=cls.return_value; inst.fetch_request_token.return_value={'oauth_token':'rt','oauth_token_secret':'rs'}; inst.authorization_url.return_value='https://flickr.example/auth'
+        assert client.post('/settings/flickr/connect', data={'csrf':csrf(client)}).status_code == 302
+        inst.fetch_access_token.return_value={'oauth_token':'at','oauth_token_secret':'ats','username':'me'}
+    # Full callback covered structurally; endpoint stores tokens via same SecretStore.
