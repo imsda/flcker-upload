@@ -11,6 +11,7 @@ from drive_to_flickr.metadata import parse_exif_datetime, choose_metadata_timest
 from drive_to_flickr.models import CalendarEvent, DriveFile, MediaKind, Status
 from drive_to_flickr.health import record_worker_heartbeat, worker_health
 from drive_to_flickr.settings_store import SettingsStore
+from drive_to_flickr.main import _heartbeat_loop
 
 TZ = ZoneInfo("America/Chicago")
 
@@ -111,6 +112,16 @@ def test_worker_heartbeat_health_states(tmp_path: Path):
     assert "CDT" in worker_health(heartbeat, 120, current, TZ)["detail"]
     stale = (current - timedelta(minutes=10)).isoformat()
     assert worker_health(stale, 120, current)["status"] == "Stale"
+
+
+def test_worker_heartbeat_loop_continues_during_long_scan():
+    store = Mock()
+    stopped = Mock()
+    stopped.wait.side_effect = [False, False, True]
+    with patch('drive_to_flickr.main.record_worker_heartbeat') as record:
+        _heartbeat_loop(store, stopped)
+    assert record.call_count == 3
+    record.assert_called_with(store)
 
 
 def test_google_clients_accept_web_oauth_credentials(tmp_path: Path):

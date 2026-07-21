@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -22,11 +23,18 @@ from .settings_store import SettingsStore
 from .secrets import SecretStore
 
 STOP = False
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 def _stop(signum: int, frame: object) -> None:
     global STOP
     STOP = True
+
+
+def _heartbeat_loop(store: SettingsStore, stopped: threading.Event) -> None:
+    record_worker_heartbeat(store)
+    while not stopped.wait(HEARTBEAT_INTERVAL_SECONDS):
+        record_worker_heartbeat(store)
 
 
 def build_processor(require_credentials: bool = True, flickr_required: bool = True) -> tuple[Processor, Database]:
@@ -68,16 +76,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, _stop)
     proc, database = build_processor(flickr_required=not args.dry_run)
     settings_store = SettingsStore(database)
-    while not STOP:
-        record_worker_heartbeat(settings_store)
-        proc.scan(dry_run=args.dry_run)
-        record_worker_heartbeat(settings_store)
-        for elapsed in range(proc.settings.poll_interval_seconds):
-            if STOP:
-                break
-            if elapsed and elapsed % 15 == 0:
-                record_worker_heartbeat(settings_store)
-            time.sleep(1)
+    heartbeat_stopped = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(settings_store, heartbeat_stopped),
+        name="worker-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        while not STOP:
+            proc.scan(dry_run=args.dry_run)
+            for _ in range(proc.settings.poll_interval_seconds):
+                if STOP:
+                    break
+                time.sleep(1)
+    finally:
+        heartbeat_stopped.set()
+        heartbeat_thread.join(timeout=2)
     return 0
 
 
