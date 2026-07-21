@@ -45,6 +45,12 @@ class Settings:
     log_level: str = "INFO"
     max_attempts: int = 5
     dry_run: bool = False
+    web_bind: str = "127.0.0.1"
+    web_port: int = 8080
+    web_secret_key: str = ""
+    admin_username: str = "admin"
+    admin_password_hash: str = ""
+    secret_store_path: Path = Path("/etc/drive-to-flickr/secrets.json")
 
 
 def _bool(value: str | None, default: bool = False) -> bool:
@@ -69,19 +75,39 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         load_dotenv(env_file)
     else:
         load_dotenv()
+    db_values: dict[str, str] = {}
+    secret_values: dict[str, str] = {}
+    db_path = Path(os.getenv("DATABASE_PATH", "/var/lib/drive-to-flickr/state.sqlite"))
     try:
-        tz = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
+        from .database import Database
+        from .settings_store import SettingsStore
+        db_values = SettingsStore(Database(db_path)).all_public()
+        from .secrets import SecretStore
+        ss = SecretStore(Path(os.getenv("SECRET_STORE_PATH", "/etc/drive-to-flickr/secrets.json")))
+        secret_values = {
+            "FLICKR_API_SECRET": ss.get("flickr_api_secret"),
+            "FLICKR_OAUTH_TOKEN": ss.get("flickr_oauth_token"),
+            "FLICKR_OAUTH_TOKEN_SECRET": ss.get("flickr_oauth_token_secret"),
+        }
+    except Exception:
+        db_values = {}
+
+    def cfg(name: str, default: str = "") -> str:
+        return os.getenv(name) or secret_values.get(name) or db_values.get(name) or default
+
+    try:
+        tz = ZoneInfo(cfg("TIMEZONE", "UTC"))
     except ZoneInfoNotFoundError as exc:
         raise ValueError("TIMEZONE is not a valid IANA timezone") from exc
     def required(name: str) -> str:
-        value = os.getenv(name)
+        value = cfg(name)
         if require_credentials and not value:
             raise ValueError(f"Missing required setting: {name}")
         return value or ""
     settings = Settings(
         timezone=tz,
-        poll_interval_seconds=_int("POLL_INTERVAL_SECONDS", 120),
-        database_path=Path(os.getenv("DATABASE_PATH", "/var/lib/drive-to-flickr/state.sqlite")),
+        poll_interval_seconds=int(cfg("POLL_INTERVAL_SECONDS", "120")),
+        database_path=db_path,
         staging_dir=Path(os.getenv("STAGING_DIR", "/var/lib/drive-to-flickr/staging")),
         google_credentials_file=Path(os.getenv("GOOGLE_CREDENTIALS_FILE", "/etc/drive-to-flickr/google-client.json")),
         google_token_file=Path(os.getenv("GOOGLE_TOKEN_FILE", "/etc/drive-to-flickr/google-token.json")),
@@ -91,19 +117,25 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         flickr_api_secret=required("FLICKR_API_SECRET"),
         flickr_oauth_token=required("FLICKR_OAUTH_TOKEN"),
         flickr_oauth_token_secret=required("FLICKR_OAUTH_TOKEN_SECRET"),
-        buffer_before_minutes=_int("BUFFER_BEFORE_MINUTES", 0),
-        buffer_after_minutes=_int("BUFFER_AFTER_MINUTES", 0),
-        require_flickr_marker=_bool(os.getenv("REQUIRE_FLICKR_MARKER"), False),
-        no_event_action=os.getenv("NO_EVENT_ACTION", "unassigned"),
-        unassigned_album=os.getenv("UNASSIGNED_ALBUM", "Unassigned Uploads"),
-        drive_success_action=os.getenv("DRIVE_SUCCESS_ACTION", "leave"),
-        drive_success_folder=os.getenv("DRIVE_SUCCESS_FOLDER"),
-        drive_failed_folder=os.getenv("DRIVE_FAILED_FOLDER"),
-        minimum_file_age_seconds=_int("MINIMUM_FILE_AGE_SECONDS", 60),
-        flickr_default_privacy=os.getenv("FLICKR_DEFAULT_PRIVACY", "private"),
-        global_tags=_csv(os.getenv("GLOBAL_TAGS")),
-        log_level=os.getenv("LOG_LEVEL", "INFO"),
-        max_attempts=_int("MAX_ATTEMPTS", 5),
+        buffer_before_minutes=int(cfg("BUFFER_BEFORE_MINUTES", "0")),
+        buffer_after_minutes=int(cfg("BUFFER_AFTER_MINUTES", "0")),
+        require_flickr_marker=_bool(cfg("REQUIRE_FLICKR_MARKER", "false"), False),
+        no_event_action=cfg("NO_EVENT_ACTION", "unassigned"),
+        unassigned_album=cfg("UNASSIGNED_ALBUM", "Unassigned Uploads"),
+        drive_success_action=cfg("DRIVE_SUCCESS_ACTION", "leave"),
+        drive_success_folder=cfg("DRIVE_SUCCESS_FOLDER") or None,
+        drive_failed_folder=cfg("DRIVE_FAILED_FOLDER") or None,
+        minimum_file_age_seconds=int(cfg("MINIMUM_FILE_AGE_SECONDS", "60")),
+        flickr_default_privacy=cfg("FLICKR_DEFAULT_PRIVACY", "private"),
+        global_tags=_csv(cfg("GLOBAL_TAGS")),
+        log_level=cfg("LOG_LEVEL", "INFO"),
+        max_attempts=int(cfg("MAX_ATTEMPTS", "5")),
+        web_bind=os.getenv("WEB_BIND", "127.0.0.1"),
+        web_port=int(os.getenv("WEB_PORT", "8080")),
+        web_secret_key=os.getenv("WEB_SECRET_KEY", ""),
+        admin_username=os.getenv("ADMIN_USERNAME", "admin"),
+        admin_password_hash=os.getenv("ADMIN_PASSWORD_HASH", ""),
+        secret_store_path=Path(os.getenv("SECRET_STORE_PATH", "/etc/drive-to-flickr/secrets.json")),
     )
     if settings.no_event_action not in VALID_NO_EVENT:
         raise ValueError("NO_EVENT_ACTION must be unassigned, skip, or manual-review")

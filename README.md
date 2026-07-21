@@ -10,20 +10,46 @@ The service is split into modules: `config` validates environment settings, `dat
 
 This project uses the Google Drive API directly instead of rclone. Google documents Drive API file listing, search, and media download behavior, and the Google Calendar API exposes event listing through official REST/client-library surfaces. Flickr's own API page notes that third-party API kits are not maintained by Flickr, so this service uses direct `requests`/OAuth calls rather than abandoned Flickr Python wrappers. See the current official references checked during implementation: Google Drive Python quickstart, Drive `files.list`/download docs, Google Calendar events list docs, and Flickr REST/upload/photosets/OAuth docs.
 
+## Recommended web setup
+
+Normal application configuration is now managed in the authenticated web UI at `http://127.0.0.1:8080/setup`. The recommended deployment model is:
+
+1. Create or use a dedicated Google account, for example `flickr-uploader@example.org`.
+2. Share the desired Google Drive upload folder with that account. The account does not need to own the folder.
+3. Share or add the desired Google Calendar to that account. The account does not need to own the calendar.
+4. Open the drive-to-flickr web UI.
+5. Connect the Google account with standard OAuth 2.0 Web Server authorization.
+6. Select the Drive folder from My Drive, shared folders, or accessible Shared Drives.
+7. Select the Calendar from calendars visible in the authenticated account's Calendar list.
+8. Configure and connect Flickr.
+9. Run a test scan.
+10. Start the worker.
+
+The UI stores normal settings in SQLite and stores OAuth/API secrets separately in a filesystem-protected secret file. OAuth tokens are never displayed in HTML or JSON responses. Existing `GOOGLE_DRIVE_FOLDER_ID` and `GOOGLE_CALENDAR_ID` environment variables are still honored/imported for backward compatibility.
+
+## Minimal bootstrap settings
+
+Only settings that protect or start the web server must be supplied outside the UI:
+
+* `ADMIN_PASSWORD_HASH`: password hash for the admin login, for example generated with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('change-me'))"`.
+* `WEB_SECRET_KEY`: a random Flask session secret.
+* `GOOGLE_CREDENTIALS_FILE`: path to the Google OAuth web-client JSON, default `/etc/drive-to-flickr/google-client.json`.
+* Optional path/binding settings: `DATABASE_PATH`, `SECRET_STORE_PATH`, `STAGING_DIR`, `WEB_BIND` (defaults to `127.0.0.1`), and `WEB_PORT` (defaults to `8080`).
+
 ## Google Cloud setup
 
 1. Create a Google Cloud project.
 2. Enable Google Drive API and Google Calendar API.
-3. Create an OAuth desktop client and download it as `/etc/drive-to-flickr/google-client.json`.
-4. Share the watched Drive folder and the dedicated calendar with the Google account used for OAuth.
+3. Create an OAuth **Web application** client. Add the callback URL shown by your deployment, normally `http://127.0.0.1:8080/oauth/google/callback` when accessed locally or through an SSH tunnel.
+4. Download it as `/etc/drive-to-flickr/google-client.json` with mode `0600`.
 
 ## Google Drive and Calendar setup
 
-Create a Drive folder for incoming media and copy its folder ID into `GOOGLE_DRIVE_FOLDER_ID`. Create a dedicated calendar, for example **Flickr Albums**, and put its ID in `GOOGLE_CALENDAR_ID`. Only this configured calendar is searched.
+Use the Settings -> Google Drive folder browser and Settings -> Calendar selector instead of manually copying IDs. The browser uses the official Drive API with all-drives support so folders shared with the authenticated account and accessible Shared Drives are selectable. Calendar selection uses the authenticated account's CalendarList.
 
 ## Flickr API/OAuth setup
 
-Create a Flickr app, copy the API key/secret into the environment file, then run headless OAuth with `drive-to-flickr auth-flickr`. Flickr photosets require a primary photo when created, so the first uploaded media item becomes the primary photo for a newly-created album.
+Create a Flickr app, enter its API key/secret on Settings -> Flickr, then click Connect Flickr. The legacy `drive-to-flickr auth-flickr` CLI remains available. Flickr photosets require a primary photo when created, so the first uploaded media item becomes the primary photo for a newly-created album.
 
 ## Calendar metadata syntax
 
@@ -76,18 +102,11 @@ pip install -e .
 sudo install -m 600 .env.example /etc/drive-to-flickr/drive-to-flickr.env
 ```
 
-Edit `/etc/drive-to-flickr/drive-to-flickr.env` and keep it mode `0600` because it contains OAuth tokens and API secrets.
+Create `/etc/drive-to-flickr/drive-to-flickr.env` with only the bootstrap settings listed above and keep it mode `0600`. Then open the setup wizard at `http://127.0.0.1:8080/setup`.
 
 ## First-run authentication
 
-On a headless server:
-
-```bash
-sudo -u flickruploader /opt/drive-to-flickr/.venv/bin/drive-to-flickr auth-google
-sudo -u flickruploader /opt/drive-to-flickr/.venv/bin/drive-to-flickr auth-flickr
-```
-
-The commands print URLs to open on another machine and then prompt for verifier codes. Store Flickr tokens in the environment file.
+Start the web UI with `drive-to-flickr web` or `drive-to-flickr-web`, log in with the bootstrap admin account, and follow the setup wizard. The legacy `auth-google` and `auth-flickr` CLI commands remain for existing deployments and recovery use.
 
 ## Running manually
 
@@ -120,7 +139,7 @@ The unit runs as `flickruploader`, uses `/opt/drive-to-flickr`, `/var/lib/drive-
 
 ## Configuration
 
-See `.env.example` for all settings. Important defaults: `POLL_INTERVAL_SECONDS=120`, `MINIMUM_FILE_AGE_SECONDS=60`, `NO_EVENT_ACTION=unassigned`, `UNASSIGNED_ALBUM=Unassigned Uploads`, `FLICKR_DEFAULT_PRIVACY=private`, and zero-minute global buffers.
+Settings -> General, Google Drive, Calendar, Flickr, and No Event Behavior are the primary configuration surfaces. SQLite table `app_settings` persists normal settings. See `.env.example` for legacy environment variables and overrides. Important defaults: `POLL_INTERVAL_SECONDS=120`, `MINIMUM_FILE_AGE_SECONDS=60`, `NO_EVENT_ACTION=unassigned`, `UNASSIGNED_ALBUM=Unassigned Uploads`, `FLICKR_DEFAULT_PRIVACY=private`, and zero-minute global buffers.
 
 ## Duplicate prevention and recovery
 
@@ -139,4 +158,4 @@ SQLite defaults to `/var/lib/drive-to-flickr/state.sqlite`. Tables are automatic
 
 ## Security considerations
 
-Do not hard-code credentials. Keep environment and token files mode `0600`, owned by `flickruploader`. The service never logs API keys, OAuth tokens, or token secrets. Original Drive files are never deleted automatically; successful files may optionally be moved.
+Do not hard-code credentials. Keep environment, Google client, and secret-store files mode `0600`, owned by `flickruploader`. The service never logs or renders API keys, OAuth tokens, token secrets, refresh tokens, or client secrets. Original Drive files are never deleted automatically; successful files may optionally be moved.

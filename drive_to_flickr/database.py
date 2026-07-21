@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS processing_log (
  message TEXT,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS app_settings (
+ key TEXT PRIMARY KEY,
+ value TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_states (
+ state TEXT PRIMARY KEY,
+ provider TEXT NOT NULL,
+ verifier TEXT,
+ created_at TEXT NOT NULL
+);
 """
 
 
@@ -116,6 +127,16 @@ class Database:
         with self.connect() as conn:
             conn.execute("""INSERT INTO photosets (normalized_name, flickr_photoset_id, display_name, calendar_event_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(normalized_name) DO UPDATE SET flickr_photoset_id=excluded.flickr_photoset_id, updated_at=excluded.updated_at""", (normalized_name, photoset_id, display_name, event_id, ts, ts))
+
+    def save_oauth_state(self, state: str, provider: str, verifier: str | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO oauth_states (state, provider, verifier, created_at) VALUES (?, ?, ?, ?)", (state, provider, verifier, now()))
+
+    def pop_oauth_state(self, state: str, provider: str) -> tuple[bool, str | None]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT verifier FROM oauth_states WHERE state=? AND provider=?", (state, provider)).fetchone()
+            conn.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+            return (False, None) if row is None else (True, row["verifier"])
 
     def status_counts(self) -> list[tuple[str, int]]:
         with self.connect() as conn:

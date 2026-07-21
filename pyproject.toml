@@ -17,6 +17,7 @@ dependencies = [
   "python-dotenv==1.1.1",
   "requests==2.32.4",
   "requests-oauthlib==2.0.0",
+  "Flask==3.1.1",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,7 @@ dev = [
 
 [project.scripts]
 drive-to-flickr = "drive_to_flickr.main:main"
+drive-to-flickr-web = "drive_to_flickr.web:main"
 
 [tool.setuptools.packages.find]
 include = ["drive_to_flickr*"]
