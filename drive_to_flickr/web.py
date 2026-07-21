@@ -69,6 +69,12 @@ def create_app() -> Flask:
 
     def friendly_google_error(exc: Exception) -> str:
         text = str(exc)
+        if "accessNotConfigured" in text or "SERVICE_DISABLED" in text or "it is disabled" in text:
+            if "drive.googleapis.com" in text:
+                return "Google Drive API is disabled for this Google Cloud project. Enable the Google Drive API in Google Cloud Console, wait a few minutes, then refresh this page."
+            if "calendar-json.googleapis.com" in text or "calendar/v3" in text:
+                return "Google Calendar API is disabled for this Google Cloud project. Enable the Google Calendar API in Google Cloud Console, wait a few minutes, then refresh this page."
+            return "A required Google API is disabled for this Google Cloud project. Enable it in Google Cloud Console, wait a few minutes, then try again."
         if "redirect_uri_mismatch" in text:
             return "Google rejected the callback URL (redirect_uri_mismatch). Copy the exact OAuth Callback URL shown here into the Google Cloud Console Authorized Redirect URIs."
         if "access_denied" in text:
@@ -196,30 +202,74 @@ def create_app() -> Flask:
     @login_required
     def drive_page():
         parent = request.args.get("parent") or None
-        folders = list_folders(secret_store, parent) if secret_store.has("google_token_json") else []
+        folders = []
+        if secret_store.has("google_token_json"):
+            try:
+                folders = list_folders(secret_store, parent)
+            except Exception as exc:
+                app.logger.warning("Unable to list Google Drive folders: %s", exc)
+                flash(friendly_google_error(exc), "error")
         return render_template("settings/google_drive.html", vals=store.all_public(), folders=folders, parent=parent)
 
     @app.post("/settings/google-drive/select")
     @login_required
-    def drive_select(): test_folder(secret_store, request.form["id"]); store.set("GOOGLE_DRIVE_FOLDER_ID", request.form["id"]); store.set("GOOGLE_DRIVE_FOLDER_NAME", request.form["name"]); flash("Drive folder selected", "success"); return redirect(url_for("drive_page"))
+    def drive_select():
+        try:
+            test_folder(secret_store, request.form["id"])
+            store.set("GOOGLE_DRIVE_FOLDER_ID", request.form["id"])
+            store.set("GOOGLE_DRIVE_FOLDER_NAME", request.form["name"])
+            flash("Drive folder selected", "success")
+        except Exception as exc:
+            app.logger.warning("Unable to select Google Drive folder: %s", exc)
+            flash(friendly_google_error(exc), "error")
+        return redirect(url_for("drive_page"))
 
     @app.post("/settings/google-drive/test")
     @login_required
-    def drive_test(): meta = test_folder(secret_store, store.get("GOOGLE_DRIVE_FOLDER_ID")); flash("Drive folder accessible: " + meta.get("name", ""), "success"); return redirect(url_for("drive_page"))
+    def drive_test():
+        try:
+            meta = test_folder(secret_store, store.get("GOOGLE_DRIVE_FOLDER_ID"))
+            flash("Drive folder accessible: " + meta.get("name", ""), "success")
+        except Exception as exc:
+            app.logger.warning("Unable to access Google Drive folder: %s", exc)
+            flash(friendly_google_error(exc), "error")
+        return redirect(url_for("drive_page"))
 
     @app.get("/settings/calendar")
     @login_required
     def calendar_page():
-        cals = list_calendars(secret_store) if secret_store.has("google_token_json") else []
+        cals = []
+        if secret_store.has("google_token_json"):
+            try:
+                cals = list_calendars(secret_store)
+            except Exception as exc:
+                app.logger.warning("Unable to list Google Calendars: %s", exc)
+                flash(friendly_google_error(exc), "error")
         return render_template("settings/calendar.html", vals=store.all_public(), calendars=cals)
 
     @app.post("/settings/calendar/select")
     @login_required
-    def cal_select(): test_calendar(secret_store, request.form["id"]); store.set("GOOGLE_CALENDAR_ID", request.form["id"]); store.set("GOOGLE_CALENDAR_NAME", request.form["name"]); flash("Calendar selected", "success"); return redirect(url_for("calendar_page"))
+    def cal_select():
+        try:
+            test_calendar(secret_store, request.form["id"])
+            store.set("GOOGLE_CALENDAR_ID", request.form["id"])
+            store.set("GOOGLE_CALENDAR_NAME", request.form["name"])
+            flash("Calendar selected", "success")
+        except Exception as exc:
+            app.logger.warning("Unable to select Google Calendar: %s", exc)
+            flash(friendly_google_error(exc), "error")
+        return redirect(url_for("calendar_page"))
 
     @app.post("/settings/calendar/test")
     @login_required
-    def cal_test(): meta = test_calendar(secret_store, store.get("GOOGLE_CALENDAR_ID")); flash("Calendar accessible: " + meta.get("summary", ""), "success"); return redirect(url_for("calendar_page"))
+    def cal_test():
+        try:
+            meta = test_calendar(secret_store, store.get("GOOGLE_CALENDAR_ID"))
+            flash("Calendar accessible: " + meta.get("summary", ""), "success")
+        except Exception as exc:
+            app.logger.warning("Unable to access Google Calendar: %s", exc)
+            flash(friendly_google_error(exc), "error")
+        return redirect(url_for("calendar_page"))
 
     @app.route("/settings/flickr", methods=["GET", "POST"])
     @login_required

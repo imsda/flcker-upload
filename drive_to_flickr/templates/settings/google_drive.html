@@ -1,1 +1,82 @@
-{% extends 'base.html' %}{% block heading %}Google Drive{% endblock %}{% block content %}<section class="card prominent"><div class="section-head"><div><h2>Watched Google Drive Folder</h2><p>{{ vals.get('GOOGLE_DRIVE_FOLDER_NAME') or vals.get('GOOGLE_DRIVE_FOLDER_ID') or 'No folder selected' }}</p>{% set label='Accessible' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'Missing' %}{% set variant='success' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'warning' %}{% include 'components/badge.html' %}</div><div class="actions"><a class="btn" href="{{ url_for('drive_page') }}">Refresh</a><form method="post" action="{{ url_for('drive_test') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="btn">Test Access</button></form></div></div></section><section class="card"><h2>Folder Browser</h2><div class="crumbs"><span>My Drive</span>{% if parent %}<span>Selected folder</span>{% endif %}</div><p class="help">Browse My Drive, shared folders, and Shared Drives. Select the folder Drive to Flickr should watch.</p><div class="folder-list">{% for f in folders %}<div class="folder-row {% if f.id == vals.get('GOOGLE_DRIVE_FOLDER_ID') %}selected{% endif %}"><span class="folder-icon">📁</span><div><strong>{{ f.name }}</strong><small>{{ 'Shared Drive' if f.get('driveId') else 'My Drive / shared folder' }} · {{ 'Editable' if f.get('capabilities', {}).get('canEdit') else 'Read access' }}</small></div><div class="actions"><a class="btn btn-sm" href="{{ url_for('drive_page', parent=f.id) }}">Open</a><form method="post" action="{{ url_for('drive_select') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="id" value="{{ f.id }}"><input type="hidden" name="name" value="{{ f.name }}"><button class="btn btn-sm btn-primary">Select</button></form></div></div>{% else %}<div class="empty">Connect Google or refresh to list available folders.</div>{% endfor %}</div></section>{% endblock %}
+{% extends 'base.html' %}
+{% block heading %}Google Drive{% endblock %}
+{% block content %}
+<section class="card prominent">
+  <div class="section-head">
+    <div>
+      <h2>Watched Google Drive Folder</h2>
+      <p>{{ vals.get('GOOGLE_DRIVE_FOLDER_NAME') or vals.get('GOOGLE_DRIVE_FOLDER_ID') or 'No folder selected' }}</p>
+      {% set label='Accessible' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'Missing' %}
+      {% set variant='success' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'warning' %}
+      {% include 'components/badge.html' %}
+    </div>
+    <div class="actions">
+      <a class="btn" href="{{ url_for('drive_page') }}">Refresh</a>
+      <form method="post" action="{{ url_for('drive_test') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <button class="btn">Test Access</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="section-head folder-browser-heading">
+    <div>
+      <h2>Folder Browser</h2>
+      <div class="crumbs"><span>My Drive</span>{% if parent %}<span>Selected folder</span>{% endif %}</div>
+    </div>
+    {% if folders %}<span class="folder-count" data-folder-count>{{ folders|length }} folders</span>{% endif %}
+  </div>
+  <p class="help">Browse My Drive, shared folders, and Shared Drives. Search this folder level or filter by location and access.</p>
+
+  {% if folders %}
+  <div class="folder-toolbar" data-folder-toolbar>
+    <label class="folder-search">
+      <span class="sr-only">Search folders</span>
+      <span aria-hidden="true">⌕</span>
+      <input type="search" placeholder="Search folders…" autocomplete="off" data-folder-search>
+    </label>
+    <label>
+      <span class="sr-only">Filter folders</span>
+      <select data-folder-filter>
+        <option value="all">All folders</option>
+        <option value="my-drive">My Drive and shared folders</option>
+        <option value="shared-drive">Shared Drives</option>
+        <option value="editable">Editable</option>
+        <option value="read-only">Read access</option>
+      </select>
+    </label>
+    <button class="btn btn-sm folder-clear" type="button" data-folder-clear hidden>Clear</button>
+  </div>
+  {% endif %}
+
+  <div class="folder-list" data-folder-list>
+    {% for f in folders %}
+    {% set is_editable = f.get('capabilities', {}).get('canEdit') %}
+    {% set location = 'shared-drive' if f.get('driveId') else 'my-drive' %}
+    <div class="folder-row {% if f.id == vals.get('GOOGLE_DRIVE_FOLDER_ID') %}selected{% endif %}"
+         data-folder-row data-folder-name="{{ f.name|lower }}" data-folder-location="{{ location }}"
+         data-folder-access="{{ 'editable' if is_editable else 'read-only' }}">
+      <span class="folder-icon">📁</span>
+      <div>
+        <strong>{{ f.name }}</strong>
+        <small>{{ 'Shared Drive' if f.get('driveId') else 'My Drive / shared folder' }} · {{ 'Editable' if is_editable else 'Read access' }}</small>
+      </div>
+      <div class="actions">
+        <a class="btn btn-sm" href="{{ url_for('drive_page', parent=f.id) }}">Open</a>
+        <form method="post" action="{{ url_for('drive_select') }}">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="id" value="{{ f.id }}">
+          <input type="hidden" name="name" value="{{ f.name }}">
+          <button class="btn btn-sm btn-primary">Select</button>
+        </form>
+      </div>
+    </div>
+    {% else %}
+    <div class="empty">Connect Google or refresh to list available folders.</div>
+    {% endfor %}
+    <div class="empty" data-folder-no-results hidden>No folders match your search and filter.</div>
+  </div>
+</section>
+{% endblock %}
