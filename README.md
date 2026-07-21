@@ -33,15 +33,27 @@ Only settings that protect or start the web server must be supplied outside the 
 
 * `ADMIN_PASSWORD_HASH`: password hash for the admin login, for example generated with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('change-me'))"`.
 * `WEB_SECRET_KEY`: a random Flask session secret.
-* `GOOGLE_CREDENTIALS_FILE`: path to the Google OAuth web-client JSON, default `/etc/drive-to-flickr/google-client.json`.
+* Optional `PUBLIC_BASE_URL`: the public HTTPS base URL used to generate OAuth callback URLs, for example `https://flickr-upload.example.org`. If unset, Flask generates the external URL from the current request.
+* Optional legacy `GOOGLE_CREDENTIALS_FILE`: path to an existing Google OAuth web-client JSON, default `/etc/drive-to-flickr/google-client.json`. New installs should paste the Client ID and Client Secret into the web UI instead.
 * Optional path/binding settings: `DATABASE_PATH`, `SECRET_STORE_PATH`, `STAGING_DIR`, `WEB_BIND` (defaults to `127.0.0.1`), and `WEB_PORT` (defaults to `8080`).
 
 ## Google Cloud setup
 
+Google requires an OAuth client to identify this application, but you no longer need to download or install a `google-client.json` file for normal setup. Create the OAuth application in Google Cloud, then paste the credentials into drive-to-flickr's web UI.
+
 1. Create a Google Cloud project.
-2. Enable Google Drive API and Google Calendar API.
-3. Create an OAuth **Web application** client. Add the callback URL shown by your deployment, normally `http://127.0.0.1:8080/oauth/google/callback` when accessed locally or through an SSH tunnel.
-4. Download it as `/etc/drive-to-flickr/google-client.json` with mode `0600`.
+2. Enable the Google Drive API.
+3. Enable the Google Calendar API.
+4. Configure the Google Auth consent screen for your deployment and add the scopes requested by drive-to-flickr.
+5. Create **OAuth Client ID -> Web Application**.
+6. Open drive-to-flickr Settings -> Google Account and copy the displayed OAuth Callback URL, such as `https://flickr-upload.example.org/oauth/google/callback`, into Google's **Authorized Redirect URIs**. Set `PUBLIC_BASE_URL` first if the app is behind a reverse proxy or has a stable public URL.
+7. Copy the Google Client ID and Client Secret into Settings -> Google Account -> Google OAuth Application, then click **Save OAuth Settings**. The Client Secret is stored in the SecretStore and is masked after saving.
+8. Click **Connect Google Account**.
+9. Sign in to Google normally and approve the Drive and Calendar permissions.
+10. Choose the shared Drive folder in Settings -> Google Drive. The connected Google account only needs access to the folder; it does not need to own it.
+11. Choose the shared Calendar in Settings -> Calendar.
+
+Existing deployments may keep using `GOOGLE_CREDENTIALS_FILE` as a legacy fallback. UI-configured Client ID/Secret values take precedence over the JSON file.
 
 ## Google Drive and Calendar setup
 
@@ -106,7 +118,7 @@ Create `/etc/drive-to-flickr/drive-to-flickr.env` with only the bootstrap settin
 
 ## First-run authentication
 
-Start the web UI with `drive-to-flickr web` or `drive-to-flickr-web`, log in with the bootstrap admin account, and follow the setup wizard. The legacy `auth-google` and `auth-flickr` CLI commands remain for existing deployments and recovery use.
+Start the web UI with `drive-to-flickr web` or `drive-to-flickr-web`, log in with the bootstrap admin account, and follow the setup wizard: General Settings, Google OAuth Application, Connect Google Account, Select Google Drive Folder, Select Google Calendar, Connect Flickr, Test Configuration, and Finish. The normal Google sign-in/consent screen is still used to connect the Google user account. The legacy `auth-google` and `auth-flickr` CLI commands remain for existing deployments and recovery use.
 
 ## Running manually
 
@@ -139,7 +151,7 @@ The unit runs as `flickruploader`, uses `/opt/drive-to-flickr`, `/var/lib/drive-
 
 ## Configuration
 
-Settings -> General, Google Drive, Calendar, Flickr, and No Event Behavior are the primary configuration surfaces. SQLite table `app_settings` persists normal settings. See `.env.example` for legacy environment variables and overrides. Important defaults: `POLL_INTERVAL_SECONDS=120`, `MINIMUM_FILE_AGE_SECONDS=60`, `NO_EVENT_ACTION=unassigned`, `UNASSIGNED_ALBUM=Unassigned Uploads`, `FLICKR_DEFAULT_PRIVACY=private`, and zero-minute global buffers.
+Settings -> General, Google Account, Google Drive, Calendar, Flickr, and No Event Behavior are the primary configuration surfaces. SQLite table `app_settings` persists normal settings. See `.env.example` for legacy environment variables and overrides. Important defaults: `POLL_INTERVAL_SECONDS=120`, `MINIMUM_FILE_AGE_SECONDS=60`, `NO_EVENT_ACTION=unassigned`, `UNASSIGNED_ALBUM=Unassigned Uploads`, `FLICKR_DEFAULT_PRIVACY=private`, and zero-minute global buffers.
 
 ## Duplicate prevention and recovery
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 SECRET_KEYS = {
+    "google_client_id",
     "google_client_secret",
     "google_refresh_token",
     "google_token_json",

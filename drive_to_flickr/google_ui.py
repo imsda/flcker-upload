@@ -19,13 +19,43 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
 ]
 
+GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+GOOGLE_CERT_URL = "https://www.googleapis.com/oauth2/v1/certs"
+
+
+class GoogleOAuthConfigError(RuntimeError):
+    """Raised when the Google OAuth application client is not configured."""
+
+
+def configured(secrets: SecretStore, client_file: Path) -> bool:
+    return bool(secrets.get("google_client_id") and secrets.get("google_client_secret")) or client_file.exists()
+
 
 def client_config(client_file: Path, secrets: SecretStore) -> dict:
-    data = json.loads(client_file.read_text()) if client_file.exists() else {"web": {}}
-    web = data.get("web") or data.get("installed") or {}
-    if secrets.get("google_client_secret"):
-        web["client_secret"] = secrets.get("google_client_secret")
-    return {"web": web}
+    client_id = secrets.get("google_client_id")
+    client_secret = secrets.get("google_client_secret")
+    if client_id and client_secret:
+        return {
+            "web": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "auth_uri": GOOGLE_AUTH_URI,
+                "token_uri": GOOGLE_TOKEN_URI,
+                "auth_provider_x509_cert_url": GOOGLE_CERT_URL,
+            }
+        }
+    if client_file.exists():
+        data = json.loads(client_file.read_text())
+        web = data.get("web") or data.get("installed") or {}
+        if not web.get("client_id"):
+            raise GoogleOAuthConfigError("Google OAuth client configuration is missing a Client ID.")
+        if not web.get("client_secret"):
+            raise GoogleOAuthConfigError("Google OAuth client configuration is missing a Client Secret.")
+        return {"web": web}
+    if not client_id:
+        raise GoogleOAuthConfigError("Google OAuth application credentials have not been configured. Enter your Client ID and Client Secret above before connecting an account.")
+    raise GoogleOAuthConfigError("Google OAuth application credentials are incomplete. Enter both Client ID and Client Secret before connecting an account.")
 
 
 def flow_for(client_file: Path, secrets: SecretStore, redirect_uri: str, state: str | None = None) -> Flow:
@@ -35,7 +65,10 @@ def flow_for(client_file: Path, secrets: SecretStore, redirect_uri: str, state: 
 
 
 def credentials(secrets: SecretStore) -> Credentials:
-    return Credentials.from_authorized_user_info(json.loads(secrets.get("google_token_json")), SCOPES)
+    token_json = secrets.get("google_token_json")
+    if not token_json:
+        raise GoogleOAuthConfigError("Google account is not connected. Connect or reauthorize the Google account first.")
+    return Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
 
 
 def authed_service(secrets: SecretStore, api: str, version: str):

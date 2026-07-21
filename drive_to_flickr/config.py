@@ -51,6 +51,7 @@ class Settings:
     admin_username: str = "admin"
     admin_password_hash: str = ""
     secret_store_path: Path = Path("/etc/drive-to-flickr/secrets.json")
+    public_base_url: str = ""
 
 
 def _bool(value: str | None, default: bool = False) -> bool:
@@ -136,6 +137,7 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         admin_username=os.getenv("ADMIN_USERNAME", "admin"),
         admin_password_hash=os.getenv("ADMIN_PASSWORD_HASH", ""),
         secret_store_path=Path(os.getenv("SECRET_STORE_PATH", "/etc/drive-to-flickr/secrets.json")),
+        public_base_url=cfg("PUBLIC_BASE_URL", ""),
     )
     if settings.no_event_action not in VALID_NO_EVENT:
         raise ValueError("NO_EVENT_ACTION must be unassigned, skip, or manual-review")
