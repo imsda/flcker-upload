@@ -311,7 +311,7 @@ def create_app() -> Flask:
             store.set("FLICKR_API_KEY", request.form.get("api_key", ""))
             if request.form.get("api_secret"): secret_store.set("flickr_api_secret", request.form["api_secret"])
             flash("Flickr API settings saved", "success")
-        return render_template("settings/flickr.html", vals=store.all_public(), flickr_connected=secret_store.has("flickr_oauth_token"), has_secret=secret_store.has("flickr_api_secret"))
+        return render_template("settings/flickr.html", vals=store.all_public(), callback=flickr_callback_url(), flickr_connected=secret_store.has("flickr_oauth_token"), has_secret=secret_store.has("flickr_api_secret"))
 
     @app.post("/settings/flickr/connect")
     @login_required

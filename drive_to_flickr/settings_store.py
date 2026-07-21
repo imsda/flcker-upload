@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from .config import VALID_DRIVE_ACTION, VALID_NO_EVENT, VALID_PRIVACY
 from .database import Database, now
 
 DEFAULT_SETTINGS: dict[str, str] = {
+    "PUBLIC_BASE_URL": "",
     "TIMEZONE": "UTC",
     "POLL_INTERVAL_SECONDS": "120",
     "BUFFER_BEFORE_MINUTES": "0",
@@ -115,4 +117,9 @@ def validate_settings(values: dict[str, str]) -> list[str]:
         errors.append("DRIVE_SUCCESS_FOLDER is required when DRIVE_SUCCESS_ACTION is move")
     if values.get("TIMEZONE") and values.get("TIMEZONE") not in available_timezones():
         errors.append("TIMEZONE must be available on this system")
+    public_base_url = values.get("PUBLIC_BASE_URL", "").strip()
+    if public_base_url:
+        parsed = urlparse(public_base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            errors.append("PUBLIC_BASE_URL must be a complete http:// or https:// URL")
     return errors
