@@ -1,0 +1,24 @@
+[Unit]
+Description=Google Drive to Flickr uploader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flickruploader
+Group=flickruploader
+WorkingDirectory=/opt/drive-to-flickr
+EnvironmentFile=/etc/drive-to-flickr/drive-to-flickr.env
+ExecStart=/opt/drive-to-flickr/.venv/bin/drive-to-flickr run
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/drive-to-flickr /etc/drive-to-flickr
+StateDirectory=drive-to-flickr
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
