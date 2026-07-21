@@ -109,6 +109,20 @@ class Database:
             row = conn.execute("SELECT attempts FROM processed_files WHERE google_drive_file_id=?", (file_id,)).fetchone()
             return int(row["attempts"])
 
+    def queue_retry(self, file_id: str) -> bool:
+        retryable = (Status.RETRY, Status.FAILED, Status.MANUAL_REVIEW)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE processed_files SET status=?, attempts=0, last_error=NULL, updated_at=? WHERE google_drive_file_id=? AND status IN (?,?,?)",
+                (Status.RETRY, now(), file_id, *retryable),
+            )
+            if cursor.rowcount:
+                conn.execute(
+                    "INSERT INTO processing_log (google_drive_file_id, status, message, created_at) VALUES (?, ?, ?, ?)",
+                    (file_id, Status.RETRY, "Manual retry queued from web UI", now()),
+                )
+            return bool(cursor.rowcount)
+
     def mark_uploaded(self, file_id: str, captured: datetime, event_id: str | None, event_title: str | None, photo_id: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE processed_files SET media_captured_at=?, calendar_event_id=?, calendar_event_title=?, flickr_photo_id=?, status=?, updated_at=? WHERE google_drive_file_id=?", (captured.isoformat(), event_id, event_title, photo_id, Status.UPLOADED, now(), file_id))

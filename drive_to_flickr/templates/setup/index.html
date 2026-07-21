@@ -38,7 +38,7 @@
       <button class="btn btn-primary">Test Configuration</button>
     </form>
   </div>
-  {% if vals.get('SETUP_LAST_TEST_AT') %}<p class="help">Last tested: {{ vals.get('SETUP_LAST_TEST_AT') }}</p>{% endif %}
+  {% if vals.get('SETUP_LAST_TEST_AT') %}<p class="help">Last tested: {{ vals.get('SETUP_LAST_TEST_AT')|local_datetime }}</p>{% endif %}
   {% if test_results %}
   <div class="grid cards setup-test-results">
     {% for result in test_results %}

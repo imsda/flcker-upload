@@ -8,7 +8,7 @@ from drive_to_flickr.drive import GoogleDriveClient
 from drive_to_flickr.calendar import GoogleCalendarClient
 from drive_to_flickr.matcher import EventMatcher, normalize_album_name, parse_event_description
 from drive_to_flickr.metadata import parse_exif_datetime, choose_metadata_timestamp
-from drive_to_flickr.models import CalendarEvent, DriveFile, MediaKind
+from drive_to_flickr.models import CalendarEvent, DriveFile, MediaKind, Status
 from drive_to_flickr.health import record_worker_heartbeat, worker_health
 from drive_to_flickr.settings_store import SettingsStore
 
@@ -87,6 +87,13 @@ def test_retry_behavior(tmp_path: Path):
     f = DriveFile("gid", "a.jpg", "image/jpeg", datetime.now(TZ), datetime.now(TZ))
     db.upsert_discovered(f)
     assert db.increment_attempts("gid", "temporary") == 1
+    assert db.queue_retry("gid") is True
+    with db.connect() as conn:
+        row = conn.execute("SELECT status, attempts, last_error FROM processed_files WHERE google_drive_file_id='gid'").fetchone()
+    assert row["status"] == Status.RETRY
+    assert row["attempts"] == 0
+    assert row["last_error"] is None
+    assert db.queue_retry("missing") is False
 
 
 def test_no_calendar_event_plan():
@@ -101,6 +108,7 @@ def test_worker_heartbeat_health_states(tmp_path: Path):
     heartbeat = record_worker_heartbeat(store, current - timedelta(seconds=30))
     assert store.get("WORKER_HEARTBEAT") == heartbeat
     assert worker_health(heartbeat, 120, current)["status"] == "Running"
+    assert "CDT" in worker_health(heartbeat, 120, current, TZ)["detail"]
     stale = (current - timedelta(minutes=10)).isoformat()
     assert worker_health(stale, 120, current)["status"] == "Stale"
 
