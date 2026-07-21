@@ -86,11 +86,12 @@ class Processor:
             attempts = self.db.increment_attempts(drive_file.id, str(exc))
             if attempts >= self.settings.max_attempts:
                 self.db.update_status(drive_file.id, Status.FAILED, str(exc))
+                LOGGER.error("Processing failed permanently: %s", exc, extra={"drive_file_id": drive_file.id, "retry_count": attempts})
                 if self.settings.drive_failed_folder:
                     self.drive.move_file(drive_file.id, self.settings.drive_failed_folder)
             else:
                 delay = min(3600, 2 ** attempts)
-                LOGGER.warning("Processing failed; will retry after backoff", extra={"drive_file_id": drive_file.id, "retry_count": attempts, "delay": delay})
+                LOGGER.warning("Processing failed; will retry after backoff: %s", exc, extra={"drive_file_id": drive_file.id, "retry_count": attempts, "delay": delay})
                 time.sleep(delay)
 
     def ensure_photoset(self, album_name: str, primary_photo_id: str, event_id: str | None) -> str:
