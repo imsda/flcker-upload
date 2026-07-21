@@ -115,3 +115,70 @@ def test_flickr_connection_workflow(client):
         assert client.post('/settings/flickr/connect', data={'csrf':csrf(client)}).status_code == 302
         inst.fetch_access_token.return_value={'oauth_token':'at','oauth_token_secret':'ats','username':'me'}
     # Full callback covered structurally; endpoint stores tokens via same SecretStore.
+
+
+def test_google_oauth_settings_storage_and_secret_redaction(client):
+    resp = client.post('/settings/google-account/oauth-settings', data={'csrf':csrf(client),'client_id':'stored-client','client_secret':'stored-secret'}, follow_redirects=True)
+    assert b'OAuth Application: Configured' in resp.data
+    assert b'stored-client' in resp.data
+    assert b'stored-secret' not in resp.data
+    ss = SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH']))
+    assert ss.get('google_client_id') == 'stored-client'
+    assert ss.get('google_client_secret') == 'stored-secret'
+
+
+def test_google_client_config_from_secret_store(tmp_path):
+    from drive_to_flickr.google_ui import client_config
+    ss = SecretStore(tmp_path/'secrets.json')
+    ss.set('google_client_id', 'ui-id')
+    ss.set('google_client_secret', 'ui-secret')
+    cfg = client_config(tmp_path/'missing.json', ss)
+    assert cfg['web']['client_id'] == 'ui-id'
+    assert cfg['web']['client_secret'] == 'ui-secret'
+    assert cfg['web']['token_uri'] == 'https://oauth2.googleapis.com/token'
+
+
+def test_google_client_config_falls_back_to_legacy_json(tmp_path):
+    from drive_to_flickr.google_ui import client_config
+    legacy = tmp_path/'google-client.json'
+    legacy.write_text(json.dumps({'web': {'client_id': 'legacy-id', 'client_secret': 'legacy-secret', 'auth_uri':'a', 'token_uri':'t'}}))
+    cfg = client_config(legacy, SecretStore(tmp_path/'secrets.json'))
+    assert cfg['web']['client_id'] == 'legacy-id'
+
+
+def test_missing_google_oauth_credentials_friendly_error(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path)
+    (tmp_path/'google-client.json').unlink()
+    from drive_to_flickr.web import create_app
+    app=create_app(); app.config['TESTING']=True
+    c=app.test_client(); login(c)
+    resp = c.post('/settings/google-account/connect', data={'csrf':csrf(c)}, follow_redirects=True)
+    assert b'Google OAuth application credentials have not been configured' in resp.data
+    assert resp.status_code == 200
+
+
+def test_public_base_url_callback(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path)
+    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://example.org/base')
+    from drive_to_flickr.web import create_app
+    app=create_app(); app.config['TESTING']=True
+    c=app.test_client(); login(c)
+    data = c.get('/settings/google-account').data
+    assert b'https://example.org/base/oauth/google/callback' in data
+
+
+def test_google_disconnect_preserves_oauth_app_credentials(client):
+    ss = SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH']))
+    ss.set('google_client_id', 'keep-id')
+    ss.set('google_client_secret', 'keep-secret')
+    ss.set('google_token_json', '{"token":"t"}')
+    client.post('/settings/google-account/disconnect', data={'csrf':csrf(client)})
+    ss = SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH']))
+    assert ss.get('google_client_id') == 'keep-id'
+    assert ss.get('google_client_secret') == 'keep-secret'
+    assert not ss.has('google_token_json')
+
+
+def test_google_oauth_denial_friendly(client):
+    resp = client.get('/oauth/google/callback?error=access_denied&error_description=access_denied', follow_redirects=True)
+    assert b'Google authorization was denied' in resp.data

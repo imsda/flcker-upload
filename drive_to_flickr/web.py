@@ -12,7 +12,7 @@ from requests_oauthlib import OAuth1Session
 from .config import load_settings
 from .database import Database, now
 from .flickr import ACCESS_TOKEN_URL, AUTHORIZE_URL, REQUEST_TOKEN_URL, FlickrClient
-from .google_ui import account_email, flow_for, list_calendars, list_folders, test_calendar, test_folder
+from .google_ui import GoogleOAuthConfigError, account_email, configured as google_oauth_configured, flow_for, list_calendars, list_folders, test_calendar, test_folder
 from .secrets import SecretStore
 from .settings_store import SettingsStore, validate_settings
 
@@ -56,6 +56,25 @@ def create_app() -> Flask:
     def form(action: str, inner: str) -> str:
         return f"<form method='post' action='{action}'><input type='hidden' name='csrf' value='{csrf()}'>{inner}</form>"
 
+    def google_callback_url() -> str:
+        base = (store.get('PUBLIC_BASE_URL') or settings.public_base_url).strip().rstrip('/')
+        if base:
+            return base + url_for('google_callback')
+        return url_for('google_callback', _external=True)
+
+    def callback_warnings(callback: str) -> list[str]:
+        if callback.startswith('http://') and not callback.startswith('http://localhost') and not callback.startswith('http://127.0.0.1'):
+            return ['Warning: Google OAuth usually requires HTTPS callback URLs unless you are using localhost for local development.']
+        return []
+
+    def friendly_google_error(exc: Exception) -> str:
+        text = str(exc)
+        if 'redirect_uri_mismatch' in text:
+            return 'Google rejected the callback URL (redirect_uri_mismatch). Copy the exact OAuth Callback URL shown here into the Google Cloud Console Authorized Redirect URIs.'
+        if 'access_denied' in text:
+            return 'Google authorization was denied. Click Connect Google Account and approve the requested permissions to continue.'
+        return text or 'Google OAuth could not be completed. Check the OAuth application configuration and try again.'
+
     @app.get('/login')
     def login():
         return page(form('/login', "<h2>Login</h2><input name='username'><input name='password' type='password'><button>Login</button>"))
@@ -91,46 +110,87 @@ def create_app() -> Flask:
     @login_required
     def settings_page():
         if request.method == 'POST':
-            vals={k:request.form.get(k,'') for k in ['TIMEZONE','POLL_INTERVAL_SECONDS','MINIMUM_FILE_AGE_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','BUFFER_BEFORE_MINUTES','BUFFER_AFTER_MINUTES','REQUIRE_FLICKR_MARKER','NO_EVENT_ACTION','UNASSIGNED_ALBUM','DRIVE_SUCCESS_ACTION','DRIVE_SUCCESS_FOLDER','DRIVE_FAILED_FOLDER','FLICKR_DEFAULT_PRIVACY','GLOBAL_TAGS']}
+            vals={k:request.form.get(k,'') for k in ['PUBLIC_BASE_URL','TIMEZONE','POLL_INTERVAL_SECONDS','MINIMUM_FILE_AGE_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','BUFFER_BEFORE_MINUTES','BUFFER_AFTER_MINUTES','REQUIRE_FLICKR_MARKER','NO_EVENT_ACTION','UNASSIGNED_ALBUM','DRIVE_SUCCESS_ACTION','DRIVE_SUCCESS_FOLDER','DRIVE_FAILED_FOLDER','FLICKR_DEFAULT_PRIVACY','GLOBAL_TAGS']}
             errs=validate_settings(store.all_public()|vals)
             if errs: flash('; '.join(errs))
             else: store.update(vals); flash('Settings saved')
         v=store.all_public()
-        fields=''.join(f"<label>{k}<input name='{k}' value='{escape(v.get(k,''))}'></label><br>" for k in ['TIMEZONE','POLL_INTERVAL_SECONDS','MINIMUM_FILE_AGE_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','BUFFER_BEFORE_MINUTES','BUFFER_AFTER_MINUTES','REQUIRE_FLICKR_MARKER','NO_EVENT_ACTION','UNASSIGNED_ALBUM','DRIVE_SUCCESS_ACTION','DRIVE_SUCCESS_FOLDER','DRIVE_FAILED_FOLDER','FLICKR_DEFAULT_PRIVACY','GLOBAL_TAGS'])
+        fields=''.join(f"<label>{k}<input name='{k}' value='{escape(v.get(k,''))}'></label><br>" for k in ['PUBLIC_BASE_URL','TIMEZONE','POLL_INTERVAL_SECONDS','MINIMUM_FILE_AGE_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','BUFFER_BEFORE_MINUTES','BUFFER_AFTER_MINUTES','REQUIRE_FLICKR_MARKER','NO_EVENT_ACTION','UNASSIGNED_ALBUM','DRIVE_SUCCESS_ACTION','DRIVE_SUCCESS_FOLDER','DRIVE_FAILED_FOLDER','FLICKR_DEFAULT_PRIVACY','GLOBAL_TAGS'])
         return page('<h2>Main Settings</h2>'+form('/settings', fields+'<button>Save</button>'))
 
     @app.get('/settings/google-account')
     @login_required
     def google_account():
         v=store.all_public(); status='Connected' if secret_store.has('google_token_json') else 'Not connected'
-        buttons=form('/settings/google-account/connect','<button>Connect Google Account</button>')+form('/settings/google-account/test','<button>Test Connection</button>')+form('/settings/google-account/disconnect','<button>Disconnect</button>')
-        return page(f"<h2>Google Account</h2><p>Email: {escape(v.get('GOOGLE_ACCOUNT_EMAIL',''))}</p><p>Status: {status}</p><p>Last successful API check: {escape(v.get('GOOGLE_LAST_API_CHECK',''))}</p>{buttons}")
+        callback=google_callback_url(); app_configured=google_oauth_configured(secret_store, settings.google_credentials_file)
+        app_status='Configured' if app_configured else 'Not configured'
+        warning_html=''.join(f"<p><strong>{escape(w)}</strong></p>" for w in callback_warnings(callback))
+        secret_text='Configured (masked)' if secret_store.has('google_client_secret') else 'Not configured'
+        client_id_value=escape(secret_store.get('google_client_id'))
+        connect_button='<button>Connect Google Account</button>' if app_configured else '<button disabled>Connect Google Account</button><p>Google OAuth application credentials have not been configured. Enter your Client ID and Client Secret above before connecting an account.</p>'
+        buttons=form('/settings/google-account/connect',connect_button)+form('/settings/google-account/test','<button>Test Connection</button>')+form('/settings/google-account/disconnect','<button>Disconnect</button>')
+        oauth_form=form('/settings/google-account/oauth-settings', f"<label>Client ID<input name='client_id' value='{client_id_value}' autocomplete='off'></label><br><label>Client Secret<input name='client_secret' placeholder='{secret_text}' type='password' autocomplete='new-password'></label><br><button>Save OAuth Settings</button>")
+        clear_form=form('/settings/google-account/oauth-settings/clear', '<button>Clear OAuth Settings</button>')
+        return page(f"<h2>Google Account</h2><h3>Google OAuth Application</h3><p>OAuth Application: {app_status}</p><p>OAuth Callback URL:<br><input readonly value='{escape(callback)}' size='80'></p>{warning_html}{oauth_form}{clear_form}<h3>Connected Google Account</h3><p>Status: {status}</p><p>Google Account: {escape(v.get('GOOGLE_ACCOUNT_EMAIL',''))}</p><p>Last successful API check: {escape(v.get('GOOGLE_LAST_API_CHECK',''))}</p>{buttons}")
+
+    @app.post('/settings/google-account/oauth-settings')
+    @login_required
+    def google_oauth_settings_save():
+        client_id=request.form.get('client_id','').strip(); client_secret=request.form.get('client_secret','').strip()
+        if not client_id:
+            flash('Missing Client ID')
+        elif not client_secret and not secret_store.has('google_client_secret'):
+            flash('Missing Client Secret')
+        else:
+            secret_store.set('google_client_id', client_id)
+            if client_secret: secret_store.set('google_client_secret', client_secret)
+            flash('Google OAuth application settings saved')
+        return redirect(url_for('google_account'))
+
+    @app.post('/settings/google-account/oauth-settings/clear')
+    @login_required
+    def google_oauth_settings_clear():
+        secret_store.delete('google_client_id','google_client_secret')
+        flash('Google OAuth application settings cleared')
+        return redirect(url_for('google_account'))
 
     @app.post('/settings/google-account/connect')
     @login_required
     def google_connect():
-        state=pysecrets.token_urlsafe(24); db.save_oauth_state(state,'google')
-        flow=flow_for(settings.google_credentials_file, secret_store, url_for('google_callback', _external=True), state)
-        auth_url,_=flow.authorization_url(access_type='offline', include_granted_scopes='true', prompt='consent')
-        return redirect(auth_url)
+        try:
+            state=pysecrets.token_urlsafe(24); db.save_oauth_state(state,'google')
+            flow=flow_for(settings.google_credentials_file, secret_store, google_callback_url(), state)
+            auth_url,_=flow.authorization_url(access_type='offline', include_granted_scopes='true', prompt='consent')
+            return redirect(auth_url)
+        except Exception as exc:
+            flash(friendly_google_error(exc)); return redirect(url_for('google_account'))
 
     @app.get('/oauth/google/callback')
     @login_required
     def google_callback():
+        if request.args.get('error'):
+            flash(friendly_google_error(Exception(request.args.get('error_description') or request.args.get('error','')))); return redirect(url_for('google_account'))
         state=request.args.get('state','')
         ok, _ = db.pop_oauth_state(state,'google')
         if not ok: abort(403)
-        flow=flow_for(settings.google_credentials_file, secret_store, url_for('google_callback', _external=True), state)
-        flow.fetch_token(authorization_response=request.url)
-        secret_store.set('google_token_json', flow.credentials.to_json())
-        email=account_email(secret_store); store.set('GOOGLE_ACCOUNT_EMAIL', email); store.set('GOOGLE_LAST_API_CHECK', now())
-        flash('Google account connected')
+        try:
+            flow=flow_for(settings.google_credentials_file, secret_store, google_callback_url(), state)
+            flow.fetch_token(authorization_response=request.url)
+            secret_store.set('google_token_json', flow.credentials.to_json())
+            email=account_email(secret_store); store.set('GOOGLE_ACCOUNT_EMAIL', email); store.set('GOOGLE_LAST_API_CHECK', now())
+            flash('Google account connected')
+        except Exception as exc:
+            flash(friendly_google_error(exc))
         return redirect(url_for('google_account'))
 
     @app.post('/settings/google-account/test')
     @login_required
     def google_test():
-        store.set('GOOGLE_ACCOUNT_EMAIL', account_email(secret_store)); store.set('GOOGLE_LAST_API_CHECK', now()); flash('Google API check succeeded'); return redirect(url_for('google_account'))
+        try:
+            store.set('GOOGLE_ACCOUNT_EMAIL', account_email(secret_store)); store.set('GOOGLE_LAST_API_CHECK', now()); flash('Google API check succeeded')
+        except Exception as exc:
+            flash(friendly_google_error(exc))
+        return redirect(url_for('google_account'))
 
     @app.post('/settings/google-account/disconnect')
     @login_required
@@ -213,7 +273,7 @@ def create_app() -> Flask:
     @login_required
     def setup():
         done=store.get('SETUP_COMPLETE')=='true'
-        body="<h2>First-run Setup Wizard</h2><ol><li>General Settings</li><li>Connect Google Account</li><li>Select Google Drive Folder</li><li>Select Google Calendar</li><li>Connect Flickr</li><li>Test Configuration</li><li>Finish</li></ol>"
+        body="<h2>First-run Setup Wizard</h2><ol><li>General Settings</li><li>Google OAuth Application - enter Client ID and Client Secret; callback URL: "+escape(google_callback_url())+"</li><li>Connect Google Account</li><li>Select Google Drive Folder</li><li>Select Google Calendar</li><li>Connect Flickr</li><li>Test Configuration</li><li>Finish</li></ol>"
         body += f"<p>Google: {'Connected' if secret_store.has('google_token_json') else 'Not connected'}<br>Drive: {'Connected' if store.get('GOOGLE_DRIVE_FOLDER_ID') else 'Not connected'}<br>Calendar: {'Connected' if store.get('GOOGLE_CALENDAR_ID') else 'Not connected'}<br>Flickr: {'Connected' if secret_store.has('flickr_oauth_token') else 'Not connected'}</p>"
         body += form('/setup/finish','<button>Finish</button>')+form('/setup/test-scan','<button>Run Test Scan</button>')
         return page(body)
