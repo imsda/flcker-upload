@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -6,6 +6,8 @@ from drive_to_flickr.database import Database
 from drive_to_flickr.matcher import EventMatcher, normalize_album_name, parse_event_description
 from drive_to_flickr.metadata import parse_exif_datetime, choose_metadata_timestamp
 from drive_to_flickr.models import CalendarEvent, DriveFile, MediaKind
+from drive_to_flickr.health import record_worker_heartbeat, worker_health
+from drive_to_flickr.settings_store import SettingsStore
 
 TZ = ZoneInfo("America/Chicago")
 
@@ -87,3 +89,14 @@ def test_retry_behavior(tmp_path: Path):
 def test_no_calendar_event_plan():
     plan = matcher().build_plan(None)
     assert plan.album_name == "Unassigned Uploads"
+
+
+def test_worker_heartbeat_health_states(tmp_path: Path):
+    store = SettingsStore(Database(tmp_path / "heartbeat.sqlite"))
+    current = datetime(2026, 7, 21, 20, 0, tzinfo=UTC)
+    assert worker_health("", 120, current)["status"] == "Not started"
+    heartbeat = record_worker_heartbeat(store, current - timedelta(seconds=30))
+    assert store.get("WORKER_HEARTBEAT") == heartbeat
+    assert worker_health(heartbeat, 120, current)["status"] == "Running"
+    stale = (current - timedelta(minutes=10)).isoformat()
+    assert worker_health(stale, 120, current)["status"] == "Stale"
