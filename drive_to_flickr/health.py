@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from .settings_store import SettingsStore
 
@@ -16,6 +17,7 @@ def worker_health(
     heartbeat: str,
     poll_interval_seconds: int,
     at: datetime | None = None,
+    display_timezone: ZoneInfo = ZoneInfo("UTC"),
 ) -> dict[str, str]:
     if not heartbeat:
         return {
@@ -38,7 +40,7 @@ def worker_health(
     current = (at or datetime.now(UTC)).astimezone(UTC)
     age_seconds = max(0, int((current - recorded).total_seconds()))
     stale_after = max(300, poll_interval_seconds * 2 + 30)
-    displayed = recorded.strftime("%Y-%m-%d %H:%M:%S UTC")
+    displayed = recorded.astimezone(display_timezone).strftime("%Y-%m-%d %I:%M:%S %p %Z")
     if age_seconds <= stale_after:
         return {
             "status": "Running",

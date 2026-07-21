@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import secrets as pysecrets
+from datetime import datetime
 from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
 from requests_oauthlib import OAuth1Session
@@ -36,6 +38,17 @@ def create_app() -> Flask:
     @app.context_processor
     def inject_globals():
         return {"csrf_token": csrf, "app_name": "Drive to Flickr", "app_subtitle": "Automated Google Drive → Flickr media publishing"}
+
+    @app.template_filter("local_datetime")
+    def local_datetime(value: str | None) -> str:
+        if not value:
+            return "—"
+        try:
+            parsed = datetime.fromisoformat(value)
+            timezone = ZoneInfo(store.get("TIMEZONE", "UTC"))
+            return parsed.astimezone(timezone).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+        except (ValueError, ZoneInfoNotFoundError):
+            return value
 
     def check_csrf() -> None:
         if request.method == "POST" and request.form.get("csrf") != session.get("csrf"):
@@ -93,7 +106,11 @@ def create_app() -> Flask:
             poll_interval = int(vals.get("POLL_INTERVAL_SECONDS", "120"))
         except ValueError:
             poll_interval = 120
-        health = worker_health(vals.get("WORKER_HEARTBEAT", ""), poll_interval)
+        try:
+            display_timezone = ZoneInfo(vals.get("TIMEZONE", "UTC"))
+        except ZoneInfoNotFoundError:
+            display_timezone = ZoneInfo("UTC")
+        health = worker_health(vals.get("WORKER_HEARTBEAT", ""), poll_interval, display_timezone=display_timezone)
         return {"vals": vals, "google_connected": google_connected, "flickr_connected": flickr_connected,
                 "drive_connected": bool(vals.get("GOOGLE_DRIVE_FOLDER_ID")), "calendar_connected": bool(vals.get("GOOGLE_CALENDAR_ID")),
                 "worker_health": health}
@@ -108,7 +125,7 @@ def create_app() -> Flask:
 
     def recent_activity() -> list[dict]:
         with db.connect() as conn:
-            return [dict(r) for r in conn.execute("SELECT google_drive_name, media_captured_at, calendar_event_title, flickr_photoset_id, status, updated_at FROM processed_files ORDER BY updated_at DESC LIMIT 10")]
+            return [dict(r) for r in conn.execute("SELECT google_drive_file_id, google_drive_name, media_captured_at, calendar_event_title, flickr_photoset_id, status, attempts, last_error, updated_at FROM processed_files ORDER BY updated_at DESC LIMIT 10")]
 
     def config_warnings() -> list[dict[str, str]]:
         d = dashboard_data(); vals = d["vals"]
@@ -137,6 +154,15 @@ def create_app() -> Flask:
     @login_required
     def dashboard():
         return render_template("dashboard.html", **dashboard_data(), metrics=upload_metrics(), activity=recent_activity(), warnings=config_warnings())
+
+    @app.post("/activity/<file_id>/retry")
+    @login_required
+    def retry_activity(file_id: str):
+        if db.queue_retry(file_id):
+            flash("Retry queued. The publisher worker will process the file during its next scan.", "success")
+        else:
+            flash("This file is not currently eligible for retry.", "error")
+        return redirect(url_for("dashboard", _anchor="activity"))
 
     @app.route("/settings", methods=["GET", "POST"])
     @login_required

@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -6,6 +7,7 @@ import pytest
 from werkzeug.security import generate_password_hash
 
 from drive_to_flickr.database import Database
+from drive_to_flickr.models import DriveFile
 from drive_to_flickr.secrets import SecretStore
 from drive_to_flickr.settings_store import SettingsStore, validate_settings
 
@@ -156,6 +158,29 @@ def test_configuration_health_and_wizard(client):
     assert b'Google Account Not Connected' in client.get('/').data
     data=client.get('/setup').data
     assert b'First-run Setup Wizard' in data and b'Test Configuration' in data
+
+
+def test_activity_retry_action_is_clickable_and_csrf_protected(client):
+    db = Database(Path(__import__('os').environ['DATABASE_PATH']))
+    drive_file = DriveFile('retry-id', 'photo.jpg', 'image/jpeg', datetime.now(UTC), datetime.now(UTC))
+    db.upsert_discovered(drive_file)
+    db.increment_attempts('retry-id', 'temporary API failure')
+    dashboard = client.get('/')
+    assert b'action="/activity/retry-id/retry"' in dashboard.data
+    assert b'>Retry</button>' in dashboard.data
+    assert client.post('/activity/retry-id/retry').status_code == 403
+    response = client.post('/activity/retry-id/retry', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert response.status_code == 200
+    assert b'Retry queued' in response.data
+
+
+def test_dashboard_times_use_configured_timezone(client):
+    db = Database(Path(__import__('os').environ['DATABASE_PATH']))
+    store = SettingsStore(db)
+    store.set('TIMEZONE', 'America/Chicago')
+    store.set('WORKER_HEARTBEAT', '2026-07-21T21:44:29+00:00')
+    response = client.get('/')
+    assert b'2026-07-21 04:44:29 PM CDT' in response.data
 
 
 def test_setup_configuration_check_reports_each_service(client):
