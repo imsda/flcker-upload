@@ -38,6 +38,12 @@ def csrf(client):
     with client.session_transaction() as s: return s['csrf']
 
 
+def connect_google_for_discovery():
+    SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH'])).set(
+        'google_token_json', '{"token":"test"}'
+    )
+
+
 def test_authentication_and_csrf_required(client):
     anon = client.application.test_client()
     assert anon.get('/').status_code == 302
@@ -75,6 +81,7 @@ def test_google_oauth_callback(client):
 
 
 def test_drive_folder_discovery_shared_drives_and_selection(client):
+    connect_google_for_discovery()
     folders=[{'id':'fld','name':'Shared Uploads','driveId':'sd','capabilities':{'canEdit':False}}]
     with patch('drive_to_flickr.web.list_folders', return_value=folders) as lf, patch('drive_to_flickr.web.test_folder', return_value={'id':'fld','name':'Shared Uploads'}):
         assert b'Shared Uploads' in client.get('/settings/google-drive').data
@@ -83,13 +90,39 @@ def test_drive_folder_discovery_shared_drives_and_selection(client):
     assert SettingsStore(Database(Path(__import__('os').environ['DATABASE_PATH']))).get('GOOGLE_DRIVE_FOLDER_ID') == 'fld'
 
 
+def test_drive_folder_browser_has_search_and_access_filters(client):
+    connect_google_for_discovery()
+    folders = [
+        {'id': 'mine', 'name': 'Photography', 'capabilities': {'canEdit': True}},
+        {'id': 'shared', 'name': 'Archive', 'driveId': 'shared-drive', 'capabilities': {'canEdit': False}},
+    ]
+    with patch('drive_to_flickr.web.list_folders', return_value=folders):
+        response = client.get('/settings/google-drive')
+    assert response.status_code == 200
+    assert b'data-folder-search' in response.data
+    assert b'data-folder-filter' in response.data
+    assert b'data-folder-location="shared-drive"' in response.data
+    assert b'data-folder-access="editable"' in response.data
+
+
 def test_inaccessible_folder_handling(client):
     with patch('drive_to_flickr.web.test_folder', side_effect=RuntimeError('forbidden')):
-        with pytest.raises(RuntimeError):
-            client.post('/settings/google-drive/test', data={'csrf':csrf(client)})
+        response = client.post('/settings/google-drive/test', data={'csrf':csrf(client)}, follow_redirects=True)
+        assert response.status_code == 200
+        assert b'forbidden' in response.data
+
+
+def test_disabled_drive_api_is_shown_as_configuration_error(client):
+    connect_google_for_discovery()
+    error = RuntimeError('drive.googleapis.com accessNotConfigured: API is disabled')
+    with patch('drive_to_flickr.web.list_folders', side_effect=error):
+        response = client.get('/settings/google-drive')
+    assert response.status_code == 200
+    assert b'Google Drive API is disabled' in response.data
 
 
 def test_calendar_list_and_shared_selection(client):
+    connect_google_for_discovery()
     calendars=[{'id':'cal@example.org','summary':'Flickr Albums','accessRole':'reader'}]
     with patch('drive_to_flickr.web.list_calendars', return_value=calendars), patch('drive_to_flickr.web.test_calendar', return_value=calendars[0]):
         assert b'Flickr Albums' in client.get('/settings/calendar').data
@@ -99,12 +132,22 @@ def test_calendar_list_and_shared_selection(client):
 
 def test_inaccessible_calendar_handling(client):
     with patch('drive_to_flickr.web.test_calendar', side_effect=RuntimeError('forbidden')):
-        with pytest.raises(RuntimeError):
-            client.post('/settings/calendar/test', data={'csrf':csrf(client)})
+        response = client.post('/settings/calendar/test', data={'csrf':csrf(client)}, follow_redirects=True)
+        assert response.status_code == 200
+        assert b'forbidden' in response.data
+
+
+def test_disabled_calendar_api_is_shown_as_configuration_error(client):
+    connect_google_for_discovery()
+    error = RuntimeError('calendar-json.googleapis.com accessNotConfigured: API is disabled')
+    with patch('drive_to_flickr.web.list_calendars', side_effect=error):
+        response = client.get('/settings/calendar')
+    assert response.status_code == 200
+    assert b'Google Calendar API is disabled' in response.data
 
 
 def test_configuration_health_and_wizard(client):
-    assert b'Google authorization expired' in client.get('/').data
+    assert b'Google Account Not Connected' in client.get('/').data
     data=client.get('/setup').data
     assert b'First-run Setup Wizard' in data and b'Run Test Scan' in data
 
@@ -119,7 +162,7 @@ def test_flickr_connection_workflow(client):
 
 def test_google_oauth_settings_storage_and_secret_redaction(client):
     resp = client.post('/settings/google-account/oauth-settings', data={'csrf':csrf(client),'client_id':'stored-client','client_secret':'stored-secret'}, follow_redirects=True)
-    assert b'OAuth Application: Configured' in resp.data
+    assert b'OAuth Application' in resp.data and b'Configured' in resp.data
     assert b'stored-client' in resp.data
     assert b'stored-secret' not in resp.data
     ss = SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH']))
