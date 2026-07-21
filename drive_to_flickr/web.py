@@ -100,11 +100,12 @@ def create_app() -> Flask:
     def config_warnings() -> list[dict[str, str]]:
         d = dashboard_data(); vals = d["vals"]
         warnings = []
-        if not d["google_connected"]: warnings.append({"message": "Google account is not connected.", "action": "Connect Google", "href": url_for("google_account")})
-        if not vals.get("GOOGLE_DRIVE_FOLDER_ID"): warnings.append({"message": "No Google Drive folder has been selected.", "action": "Select Drive Folder", "href": url_for("drive_page")})
-        if not vals.get("GOOGLE_CALENDAR_ID"): warnings.append({"message": "No Calendar has been selected.", "action": "Select Calendar", "href": url_for("calendar_page")})
-        if not d["flickr_connected"]: warnings.append({"message": "Flickr has not been connected.", "action": "Connect Flickr", "href": url_for("flickr_page")})
-        if d["worker_status"] != "Running": warnings.append({"message": "Worker status is not confirmed as running.", "action": "View Status", "href": url_for("dashboard")})
+        if not google_oauth_configured(secret_store, settings.google_credentials_file): warnings.append({"title": "Google OAuth Not Configured", "message": "Google OAuth not configured", "detail": "Add your Google OAuth Client ID and Client Secret before connecting Google services.", "action": "Configure OAuth", "href": url_for("google_account")})
+        if not d["google_connected"]: warnings.append({"title": "Google Account Not Connected", "message": "Google account is not connected.", "detail": "Connect a Google account to browse shared Drive folders and Calendars.", "action": "Connect Google", "href": url_for("google_account")})
+        if not vals.get("GOOGLE_DRIVE_FOLDER_ID"): warnings.append({"title": "Drive Folder Missing", "message": "No Google Drive folder has been selected.", "detail": "Choose the Drive folder that Drive to Flickr should watch for new media.", "action": "Select Drive Folder", "href": url_for("drive_page")})
+        if not vals.get("GOOGLE_CALENDAR_ID"): warnings.append({"title": "Calendar Missing", "message": "No Calendar has been selected.", "detail": "Select the Google Calendar used to map capture times to Flickr albums.", "action": "Select Calendar", "href": url_for("calendar_page")})
+        if not d["flickr_connected"]: warnings.append({"title": "Flickr Disconnected", "message": "Flickr has not been connected.", "detail": "Connect Flickr so processed Drive media can be published to albums.", "action": "Connect Flickr", "href": url_for("flickr_page")})
+        if d["worker_status"] != "Running": warnings.append({"title": "Worker Status Unknown", "message": "Worker status is not confirmed as running.", "detail": "Restart or verify the background service if publishing has stopped.", "action": "View Status", "href": url_for("dashboard")})
         return warnings
 
     @app.get("/login")
