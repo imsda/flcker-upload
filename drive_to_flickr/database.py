@@ -123,6 +123,33 @@ class Database:
                 )
             return bool(cursor.rowcount)
 
+    def queue_all_failed(self) -> int:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT google_drive_file_id FROM processed_files WHERE status=?",
+                (Status.FAILED,),
+            ).fetchall()
+            if not rows:
+                return 0
+            timestamp = now()
+            conn.execute(
+                "UPDATE processed_files SET status=?, attempts=0, last_error=NULL, updated_at=? WHERE status=?",
+                (Status.RETRY, timestamp, Status.FAILED),
+            )
+            conn.executemany(
+                "INSERT INTO processing_log (google_drive_file_id, status, message, created_at) VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        row["google_drive_file_id"],
+                        Status.RETRY,
+                        "Bulk retry queued from web UI",
+                        timestamp,
+                    )
+                    for row in rows
+                ],
+            )
+            return len(rows)
+
     def mark_uploaded(self, file_id: str, captured: datetime, event_id: str | None, event_title: str | None, photo_id: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE processed_files SET media_captured_at=?, calendar_event_id=?, calendar_event_title=?, flickr_photo_id=?, status=?, updated_at=? WHERE google_drive_file_id=?", (captured.isoformat(), event_id, event_title, photo_id, Status.UPLOADED, now(), file_id))

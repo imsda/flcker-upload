@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode
+from xml.etree import ElementTree
 
+import requests
+from oauthlib.oauth1 import Client as OAuth1Client
 from requests_oauthlib import OAuth1Session
 
 from .matcher import normalize_album_name
@@ -29,6 +33,8 @@ class FlickrClient:
     def __init__(self, api_key: str, api_secret: str, token: str, token_secret: str) -> None:
         self.api_key = api_key
         self.session = OAuth1Session(api_key, client_secret=api_secret, resource_owner_key=token, resource_owner_secret=token_secret)
+        self.upload_signer = OAuth1Client(api_key, client_secret=api_secret, resource_owner_key=token, resource_owner_secret=token_secret)
+        self.upload_session = requests.Session()
 
     @staticmethod
     def authorize(api_key: str, api_secret: str) -> tuple[str, str]:
@@ -53,15 +59,42 @@ class FlickrClient:
         data = {"api_key": self.api_key, "title": title, "description": description or "", "tags": " ".join(tags), **PRIVACY_MAP[privacy]}
         if date_taken:
             data["date_taken"] = date_taken
+        # OAuth normally excludes multipart fields from its signature. Flickr's upload
+        # API instead requires every form field except the photo bytes to be signed.
+        # Sign the equivalent form-encoded body, then reuse only its Authorization
+        # header on the actual multipart request.
+        _, signed_headers, _ = self.upload_signer.sign(
+            UPLOAD_URL,
+            http_method="POST",
+            body=urlencode(data),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
         with path.open("rb") as fh:
-            response = self.session.post(UPLOAD_URL, data=data, files={"photo": fh}, timeout=300)
-        response.raise_for_status()
-        text = response.text
-        start = text.find("<photoid>") + len("<photoid>")
-        end = text.find("</photoid>")
-        if start < len("<photoid>") or end == -1:
-            raise RuntimeError(f"Unexpected Flickr upload response: {text[:200]}")
-        return str(text[start:end])
+            response = self.upload_session.post(
+                UPLOAD_URL,
+                data=data,
+                files={"photo": fh},
+                headers={"Authorization": signed_headers["Authorization"]},
+                timeout=300,
+            )
+        try:
+            root = ElementTree.fromstring(response.text)
+        except ElementTree.ParseError:
+            root = None
+        error = root.find(".//err") if root is not None else None
+        if error is not None:
+            raise RuntimeError(
+                f"Flickr upload failed (code {error.get('code', 'unknown')}): "
+                f"{error.get('msg', 'Unknown Flickr error')}"
+            )
+        if not response.ok:
+            oauth_problem = parse_qs(response.text).get("oauth_problem", [""])[0]
+            detail = oauth_problem.replace("_", " ") if oauth_problem else response.reason
+            raise RuntimeError(f"Flickr upload failed (HTTP {response.status_code}): {detail}")
+        photo_id = root.findtext(".//photoid") if root is not None else None
+        if not photo_id:
+            raise RuntimeError("Flickr returned an unexpected upload response without a photo ID")
+        return str(photo_id)
 
     def list_photosets(self) -> dict[str, tuple[str, str]]:
         data = self._call("flickr.photosets.getList")
