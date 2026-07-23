@@ -164,6 +164,16 @@ def create_app() -> Flask:
             flash("This file is not currently eligible for retry.", "error")
         return redirect(url_for("dashboard", _anchor="activity"))
 
+    @app.post("/activity/retry-failed")
+    @login_required
+    def retry_failed_activity():
+        count = db.queue_all_failed()
+        if count:
+            flash(f"Queued {count} failed files for retry.", "success")
+        else:
+            flash("There are no failed files to retry.", "info")
+        return redirect(url_for("dashboard", _anchor="activity"))
+
     @app.route("/settings", methods=["GET", "POST"])
     @login_required
     def settings_page():

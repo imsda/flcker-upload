@@ -7,7 +7,7 @@ import pytest
 from werkzeug.security import generate_password_hash
 
 from drive_to_flickr.database import Database
-from drive_to_flickr.models import DriveFile
+from drive_to_flickr.models import DriveFile, Status
 from drive_to_flickr.secrets import SecretStore
 from drive_to_flickr.settings_store import SettingsStore, validate_settings
 
@@ -176,6 +176,21 @@ def test_activity_retry_action_is_clickable_and_csrf_protected(client):
     response = client.post('/activity/retry-id/retry', data={'csrf': csrf(client)}, follow_redirects=True)
     assert response.status_code == 200
     assert b'Retry queued' in response.data
+
+
+def test_all_failed_activity_can_be_retried_with_csrf(client):
+    db = Database(Path(__import__('os').environ['DATABASE_PATH']))
+    for index in range(2):
+        drive_file = DriveFile(f'failed-{index}', f'photo-{index}.jpg', 'image/jpeg', datetime.now(UTC), datetime.now(UTC))
+        db.upsert_discovered(drive_file)
+        db.update_status(drive_file.id, Status.FAILED, 'Flickr upload failed')
+    dashboard = client.get('/')
+    assert b'Retry all 2 failed' in dashboard.data
+    assert client.post('/activity/retry-failed').status_code == 403
+    response = client.post('/activity/retry-failed', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert response.status_code == 200
+    assert b'Queued 2 failed files for retry' in response.data
+    assert dict(db.status_counts())[Status.RETRY] == 2
 
 
 def test_dashboard_times_use_configured_timezone(client):
