@@ -1,10 +1,10 @@
 # drive-to-flickr
 
-`drive-to-flickr` is a production-oriented Python 3.12+ Linux service that polls a configured Google Drive folder, downloads supported photo/video files, determines their capture time, matches that time against a dedicated Google Calendar, uploads the media to Flickr, and assigns it to a Flickr album/photoset.
+`drive-to-flickr` is a production-oriented Python 3.12+ Linux service that polls a configured Google Drive folder **or a NAS share** (directly over SMB, or a mounted folder), downloads supported photo/video files, determines their capture time, matches that time against a dedicated Google Calendar, uploads the media to Flickr, and assigns it to a Flickr album/photoset.
 
 ## Architecture
 
-The service is split into modules: `config` validates environment settings, `database` owns SQLite state, `drive` uses the official Google Drive API, `calendar` uses the official Google Calendar API, `metadata` shells out to ExifTool, `matcher` parses event descriptions and selects albums, `flickr` calls Flickr REST/upload APIs directly with OAuth 1.0a, and `processor` coordinates the idempotent pipeline.
+The service is split into modules: `config` validates environment settings, `database` owns SQLite state, `sources` abstracts where media comes from (Google Drive, an SMB network share, or a mounted folder), `drive` uses the official Google Drive API, `calendar` uses the official Google Calendar API, `metadata` shells out to ExifTool, `matcher` parses event descriptions and selects albums, `flickr` calls Flickr REST/upload APIs directly with OAuth 1.0a, and `processor` coordinates the idempotent pipeline.
 
 ## API implementation decision
 
@@ -29,12 +29,61 @@ The worker records a heartbeat in the application database while it runs. The da
 
 The UI stores normal settings in SQLite and stores OAuth/API secrets separately in a filesystem-protected secret file. OAuth tokens are never displayed in HTML or JSON responses. Existing `GOOGLE_DRIVE_FOLDER_ID` and `GOOGLE_CALENDAR_ID` environment variables are still honored/imported for backward compatibility.
 
+## Choosing the media source: Google Drive or a NAS
+
+Open **Settings → Source** and pick where media is pulled from:
+
+* **Google Drive folder** (default): choose the folder on the Drive page.
+* **NAS network share (SMB)**: the app connects to the NAS itself. Nothing needs to be mounted on the server. Recommended for Ugreen, Synology, QNAP, TrueNAS and Windows shares.
+* **Folder mounted on this server**: for shares you mount yourself, for example NFS.
+
+The Calendar still comes from Google either way, so a Google account must be connected even when the source is a NAS.
+
+### NAS network share (SMB)
+
+1. On the NAS, make sure SMB is enabled. On a Ugreen NAS this is under Control Panel → File Service → SMB, and it is on by default.
+2. Create or pick a NAS user for the uploader. Give it **read** access to the shared folder, or **read/write** if files should be moved after upload.
+3. In **Settings → Source**, choose **NAS network share (SMB)** and enter:
+   * **NAS server**: the NAS IP address or host name, for example `192.168.1.20`. You can also paste a full address such as `\\192.168.1.20\Photos\Events` or `smb://nas/Photos`; it is split into server, share and folder for you.
+   * **Shared folder**: the share name, for example `Photos`.
+   * **Folder inside the share** (optional): leave blank for the whole share.
+   * **Username / Password**: the NAS account. The password is stored in the protected secret store, never in the database, and is never shown again.
+4. Click **Save Source**. The **Share Folder Browser** then lists the share's folders. Click **Use this folder** to pick the watched folder.
+5. Click **Test Source** to confirm the app can read the share and see how many photos and videos it found.
+
+Files are copied into the staging area for processing and deleted afterwards, the same as Google Drive files. Subfolders are included unless you untick **Include subfolders**. Hidden files and NAS housekeeping folders (`@eaDir`, `#recycle`, `.ugreen…` and similar) are skipped. To move files after upload, set **General → After successful upload** to `move` and fill in **Move uploaded files to** with a folder path inside the same share, for example `Photos-Uploaded`. A move-to folder inside the watched folder is excluded from scanning.
+
+The server must be able to reach the NAS on TCP port 445. Connections time out after 15 seconds, and the error says whether the NAS was unreachable, the login was rejected, or the share or folder does not exist.
+
+Each file is identified by its path relative to the watched folder. Renaming or moving a file inside the share makes it look new.
+
+### Folder mounted on this server
+
+If you prefer to mount the share yourself, for example over NFS, mount it on the server and choose **Folder mounted on this server**. Example `/etc/fstab` lines:
+
+```text
+# SMB/CIFS. Keep credentials in a 0600 file.
+//nas.local/photos  /mnt/nas/photos  cifs  credentials=/etc/drive-to-flickr/nas-credentials,uid=flickruploader,gid=flickruploader,ro,_netdev,nofail  0  0
+# NFS
+nas.local:/volume1/photos  /mnt/nas/photos  nfs  ro,_netdev,nofail  0  0
+```
+
+Enter `/mnt/nas/photos` on the Source page, or browse to it and click **Use this folder**. Files are read in place. Moving files after upload needs a read-write mount, and the systemd unit must be allowed to write there:
+
+```bash
+sudo systemctl edit drive-to-flickr
+# add:
+# [Service]
+# ReadWritePaths=/mnt/nas/photos /mnt/nas/photos-uploaded
+```
+
 ## Minimal bootstrap settings
 
 Only settings that protect or start the web server must be supplied outside the UI:
 
 * `ADMIN_PASSWORD_HASH`: password hash for the admin login, for example generated with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('change-me'))"`.
-* `WEB_SECRET_KEY`: a random Flask session secret.
+* `WEB_SECRET_KEY`: a random Flask session secret. Without it, every web UI restart signs everyone out.
+* Optional `SESSION_COOKIE_SECURE=true`: only send the login cookie over HTTPS. Set this when the UI is served over HTTPS (for example behind a reverse proxy).
 * Optional `PUBLIC_BASE_URL`: the public HTTPS base URL used to generate OAuth callback URLs, for example `https://flickr-upload.example.org`. If unset, Flask generates the external URL from the current request.
 * Optional legacy `GOOGLE_CREDENTIALS_FILE`: path to an existing Google OAuth web-client JSON, default `/etc/drive-to-flickr/google-client.json`. New installs should paste the Client ID and Client Secret into the web UI instead.
 * Optional path/binding settings: `DATABASE_PATH`, `SECRET_STORE_PATH`, `STAGING_DIR`, `WEB_BIND` (defaults to `127.0.0.1`), and `WEB_PORT` (defaults to `8080`).
@@ -107,9 +156,9 @@ A photo captured on June 4, 2026 at 7:42 PM in `America/Chicago` matches the mul
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3.12 python3.12-venv exiftool
-sudo mkdir -p /opt/drive-to-flickr
-sudo cp -a . /opt/drive-to-flickr
-cd /opt/drive-to-flickr
+sudo mkdir -p /opt/flcker-upload
+sudo cp -a . /opt/flcker-upload
+cd /opt/flcker-upload
 python3.12 -m venv .venv
 . .venv/bin/activate
 pip install -e .
@@ -120,15 +169,17 @@ Create `/etc/drive-to-flickr/drive-to-flickr.env` with only the bootstrap settin
 
 ## First-run authentication
 
-Start the web UI with `drive-to-flickr web` or `drive-to-flickr-web`, log in with the bootstrap admin account, and follow the setup wizard: General Settings, Google OAuth Application, Connect Google Account, Select Google Drive Folder, Select Google Calendar, Connect Flickr, Test Configuration, and Finish. The normal Google sign-in/consent screen is still used to connect the Google user account. The legacy `auth-google` and `auth-flickr` CLI commands remain for existing deployments and recovery use.
+Start the web UI with `drive-to-flickr web` or `drive-to-flickr-web` (served by Waitress), log in with the bootstrap admin account, and follow the setup wizard: General Settings, Google OAuth Application, Connect Google Account, Select Google Drive Folder, Select Google Calendar, Connect Flickr, Test Configuration, and Finish. The normal Google sign-in/consent screen is still used to connect the Google user account. The legacy `auth-google` and `auth-flickr` CLI commands remain for existing deployments and recovery use.
 
 ## Running manually
 
 ```bash
-drive-to-flickr test-drive
+drive-to-flickr test-source      # lists files in the configured Drive folder, SMB share or mounted folder (alias: test-drive)
 drive-to-flickr test-calendar '2026-06-04T19:42:00-05:00'
 drive-to-flickr test-flickr
 drive-to-flickr scan
+drive-to-flickr retry            # re-queue every failed file, then scan
+drive-to-flickr reconcile        # record Flickr photo IDs for uploads that finished but were not recorded
 ```
 
 ## Dry-run/testing
@@ -151,13 +202,23 @@ sudo journalctl -u drive-to-flickr -f
 
 The provided unit uses `/opt/flcker-upload`, `/var/lib/drive-to-flickr`, and `/etc/drive-to-flickr`, and enables hardening such as `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, and `ProtectHome=true`. Adjust `User` and `Group` in the unit to match the account that owns the application and protected secret store on an existing deployment.
 
+## Processing, retries and performance
+
+* The worker reloads its settings before every scan, so changes made in the web UI take effect without a restart.
+* Up to `WORKER_CONCURRENCY` files (General → Parallel uploads; default 3, max 8) are downloaded, matched and uploaded at the same time. Album creation is serialised so parallel uploads never create duplicate albums.
+* Calendar events are fetched once per capture day per scan rather than once per photo. The query covers the day before and after, so buffers that cross midnight still match.
+* Uploads stream from disk instead of being loaded into memory, which matters for large videos.
+* A failed file is retried with exponential backoff (1, 2, 4, 8… minutes, capped at one hour) without holding up other files. After `MAX_ATTEMPTS` it is marked `failed` and left alone until you click **Retry**. Files in `manual_review` are also left alone until retried.
+* With `NO_EVENT_ACTION=skip`, files with no matching event are checked against the calendar again once an hour.
+* Staged Google Drive downloads are deleted as soon as each file finishes, and leftovers from a crash are removed when the worker starts.
+
 ## Configuration
 
-Settings -> General, Google Account, Google Drive, Calendar, Flickr, and No Event Behavior are the primary configuration surfaces. SQLite table `app_settings` persists normal settings. See `.env.example` for legacy environment variables and overrides. Important defaults: `POLL_INTERVAL_SECONDS=120`, `MINIMUM_FILE_AGE_SECONDS=60`, `NO_EVENT_ACTION=unassigned`, `UNASSIGNED_ALBUM=Unassigned Uploads`, `FLICKR_DEFAULT_PRIVACY=private`, and zero-minute global buffers.
+Settings -> General, Google Account, Google Drive, Calendar, Flickr, and No Event Behavior are the primary configuration surfaces. SQLite table `app_settings` persists normal settings. See `.env.example` for legacy environment variables and overrides. Important defaults: `SOURCE_TYPE=google_drive`, `WORKER_CONCURRENCY=3`, `POLL_INTERVAL_SECONDS=120`, `MINIMUM_FILE_AGE_SECONDS=60`, `NO_EVENT_ACTION=unassigned`, `UNASSIGNED_ALBUM=Unassigned Uploads`, `FLICKR_DEFAULT_PRIVACY=private`, and zero-minute global buffers.
 
 ## Duplicate prevention and recovery
 
-The primary identity is Google Drive file ID, stored uniquely in SQLite. Checksums are stored when Drive provides them. Every upload includes a hashed Drive-ID machine tag so `reconcile` and retry paths can search Flickr before re-uploading after a crash. If a crash happens after Flickr upload but before SQLite completion, the next attempt searches for that tag and reuses the existing Flickr photo ID where possible, then finishes photoset assignment. This minimizes duplicate uploads, although Flickr search indexing latency can delay reconciliation.
+The primary identity is Google Drive file ID, stored uniquely in SQLite. Checksums are stored when Drive provides them. Every upload includes a hashed file-ID machine tag so `reconcile` and retry paths can search Flickr before re-uploading after a crash. The search runs only for files with an earlier attempt, so first uploads skip that extra API call. If a crash happens after Flickr upload but before SQLite completion, the next attempt searches for that tag and reuses the existing Flickr photo ID where possible, then finishes photoset assignment. This minimizes duplicate uploads, although Flickr search indexing latency can delay reconciliation.
 
 ## Troubleshooting
 
@@ -172,4 +233,4 @@ SQLite defaults to `/var/lib/drive-to-flickr/state.sqlite`. Tables are automatic
 
 ## Security considerations
 
-Do not hard-code credentials. Keep environment, Google client, and secret-store files mode `0600`, owned by `flickruploader`. The service never logs or renders API keys, OAuth tokens, token secrets, refresh tokens, or client secrets. Original Drive files are never deleted automatically; successful files may optionally be moved.
+Do not hard-code credentials. Keep environment, Google client, and secret-store files mode `0600`, owned by `flickruploader`. The service never logs or renders API keys, OAuth tokens, token secrets, refresh tokens, or client secrets. Original Drive and NAS files are never deleted automatically; successful files may optionally be moved. Failed admin sign-ins are rate-limited (5 attempts per 15 minutes per IP), and sessions expire after 12 hours.

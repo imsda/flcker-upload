@@ -17,6 +17,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/drive-to-flickr /etc/drive-to-flickr
+# A local/NAS source is readable as-is. To move files on the share after upload, add it
+# with `systemctl edit drive-to-flickr`, e.g. ReadWritePaths=/mnt/nas/photos
 StateDirectory=drive-to-flickr
 UMask=0077
 

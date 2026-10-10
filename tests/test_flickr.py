@@ -39,8 +39,11 @@ def test_upload_signs_all_metadata_but_not_photo(tmp_path: Path):
     }
     assert "photo" not in signed_fields
     post_call = client.upload_session.post.call_args
-    assert post_call.kwargs["headers"] == {"Authorization": "OAuth signed"}
-    assert post_call.kwargs["files"]["photo"].name == str(photo)
+    assert post_call.kwargs["headers"]["Authorization"] == "OAuth signed"
+    body = post_call.kwargs["data"]
+    assert post_call.kwargs["headers"]["Content-Type"] == body.content_type
+    assert body.fields["photo"][0] == "photo.jpg"
+    assert body.fields["title"] == "Camp"
 
 
 def test_upload_reports_safe_flickr_error(tmp_path: Path):

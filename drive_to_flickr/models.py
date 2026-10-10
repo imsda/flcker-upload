@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
-from pathlib import Path
 
 
 class MediaKind(StrEnum):
@@ -28,6 +27,8 @@ class Status(StrEnum):
 
 @dataclass(frozen=True)
 class DriveFile:
+    """A media file from the configured source (Google Drive or a local/NAS folder)."""
+
     id: str
     name: str
     mime_type: str
@@ -83,14 +84,3 @@ class AlbumPlan:
     event: CalendarEvent | None
     description: str | None = None
 
-
-@dataclass(frozen=True)
-class UploadResult:
-    photo_id: str
-
-
-@dataclass(frozen=True)
-class DownloadedFile:
-    drive_file: DriveFile
-    path: Path
-    kind: MediaKind

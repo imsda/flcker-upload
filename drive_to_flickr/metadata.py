@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import subprocess
 from datetime import datetime
@@ -14,6 +15,9 @@ PHOTO_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".webp"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v"}
 PHOTO_KEYS = ("DateTimeOriginal", "CreateDate", "ModifyDate")
 VIDEO_KEYS = ("MediaCreateDate", "TrackCreateDate", "CreateDate", "ModifyDate")
+EXIFTOOL_TIMEOUT_SECONDS = 120
+
+LOGGER = logging.getLogger(__name__)
 
 
 def detect_media_kind(path: Path, mime_type: str = "") -> MediaKind | None:
@@ -43,16 +47,31 @@ def choose_metadata_timestamp(tags: dict[str, str], kind: MediaKind, timezone: Z
     keys = PHOTO_KEYS if kind == MediaKind.PHOTO else VIDEO_KEYS
     for key in keys:
         value = tags.get(key)
-        if value:
-            return MediaMetadata(parse_exif_datetime(value, timezone), key)
+        # Cameras without a clock write all-zero dates; skip those and unparsable values.
+        if value and not str(value).startswith("0000"):
+            try:
+                return MediaMetadata(parse_exif_datetime(str(value), timezone), key)
+            except ValueError:
+                continue
     return MediaMetadata(drive_file.created_at or drive_file.modified_at, "drive_createdTime")
 
 
 def read_exiftool(path: Path) -> dict[str, str]:
-    result = subprocess.run(["exiftool", "-json", "-DateTimeOriginal", "-CreateDate", "-ModifyDate", "-MediaCreateDate", "-TrackCreateDate", "-Keywords", str(path)], check=False, capture_output=True, text=True)
+    """Read timestamp tags; returns {} so callers fall back to source timestamps on any failure."""
+    try:
+        result = subprocess.run(["exiftool", "-json", "-DateTimeOriginal", "-CreateDate", "-ModifyDate", "-MediaCreateDate", "-TrackCreateDate", "-Keywords", str(path)], check=False, capture_output=True, text=True, timeout=EXIFTOOL_TIMEOUT_SECONDS)
+    except FileNotFoundError:
+        LOGGER.warning("ExifTool is not installed; using file timestamps instead of capture time")
+        return {}
+    except subprocess.TimeoutExpired:
+        LOGGER.warning("ExifTool timed out reading %s; using file timestamps", path.name)
+        return {}
     if result.returncode != 0:
         return {}
-    payload = json.loads(result.stdout or "[]")
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return {}
     return payload[0] if payload else {}
 
 

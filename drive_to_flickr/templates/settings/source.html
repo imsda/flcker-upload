@@ -1,0 +1,150 @@
+{% extends 'base.html' %}
+{% block heading %}Media Source{% endblock %}
+{% block subheading %}Choose where the publisher pulls photos and videos from.{% endblock %}
+{% block content %}
+{% set source_type = vals.get('SOURCE_TYPE') or 'google_drive' %}
+<section class="card prominent">
+  <div class="section-head">
+    <div>
+      <h2>Current Source</h2>
+      {% if source_type == 'smb' %}
+      <p>Network share (SMB): <code>{{ smb_display or 'Not set up' }}</code></p>
+      {% set label='Configured' if smb_display else 'Missing' %}
+      {% set variant='success' if smb_display else 'warning' %}
+      {% elif source_type == 'local' %}
+      <p>Mounted folder: <code>{{ vals.get('LOCAL_SOURCE_PATH') or 'No folder set' }}</code></p>
+      {% set label='Configured' if vals.get('LOCAL_SOURCE_PATH') else 'Missing' %}
+      {% set variant='success' if vals.get('LOCAL_SOURCE_PATH') else 'warning' %}
+      {% else %}
+      <p>Google Drive: {{ vals.get('GOOGLE_DRIVE_FOLDER_NAME') or vals.get('GOOGLE_DRIVE_FOLDER_ID') or 'No folder selected' }}</p>
+      {% set label='Configured' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'Missing' %}
+      {% set variant='success' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'warning' %}
+      {% endif %}
+      {% include 'components/badge.html' %}
+    </div>
+    <div class="actions">
+      <form method="post" action="{{ url_for('source_test') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <button class="btn">Test Source</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<form method="post" action="{{ url_for('source_page') }}" class="settings-form">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <section class="card">
+    <h2>Pull Media From</h2>
+    <div class="radio-row">
+      <label class="radio-pill"><input type="radio" name="SOURCE_TYPE" value="google_drive" data-source-choice {% if source_type == 'google_drive' %}checked{% endif %}> Google Drive folder</label>
+      <label class="radio-pill"><input type="radio" name="SOURCE_TYPE" value="smb" data-source-choice {% if source_type == 'smb' %}checked{% endif %}> NAS network share (SMB)</label>
+      <label class="radio-pill"><input type="radio" name="SOURCE_TYPE" value="local" data-source-choice {% if source_type == 'local' %}checked{% endif %}> Folder mounted on this server</label>
+    </div>
+    <p class="help">A Google account is still needed for the Calendar, whichever source you pick.</p>
+  </section>
+
+  <section class="card" data-source-panel="google_drive">
+    <h2>Google Drive Folder</h2>
+    <p class="help">Choose the watched folder on the <a href="{{ url_for('drive_page') }}">Drive</a> page.</p>
+  </section>
+
+  <section class="card" data-source-panel="smb">
+    <h2>NAS Network Share (SMB)</h2>
+    <p class="help">Connects straight to a Ugreen, Synology, QNAP, TrueNAS or Windows share. Nothing needs to be mounted on this server. Use a NAS account with read access to the share; it needs read/write access if you want files moved after upload.</p>
+    <div class="form-grid">
+      <label>NAS server<input name="SMB_SERVER" value="{{ vals.get('SMB_SERVER') }}" placeholder="192.168.1.20 or nas.local" autocomplete="off"></label>
+      <label>Shared folder<input name="SMB_SHARE" value="{{ vals.get('SMB_SHARE') }}" placeholder="Photos" autocomplete="off"></label>
+      <label>Folder inside the share<input name="SMB_FOLDER" value="{{ vals.get('SMB_FOLDER') }}" placeholder="Leave blank for the whole share"></label>
+      <label>Username<input name="SMB_USERNAME" value="{{ vals.get('SMB_USERNAME') }}" autocomplete="off"></label>
+      <label>Password<input type="password" name="SMB_PASSWORD" autocomplete="new-password" placeholder="{{ 'Saved. Leave blank to keep it' if has_smb_password else '' }}"></label>
+      <label>Port<input type="number" name="SMB_PORT" value="{{ vals.get('SMB_PORT') or '445' }}"></label>
+      <label class="check"><input type="checkbox" name="SMB_RECURSIVE" {% if vals.get('SMB_RECURSIVE') != 'false' %}checked{% endif %}> Include subfolders</label>
+      <label>Move uploaded files to<input name="SMB_SUCCESS_FOLDER" value="{{ vals.get('SMB_SUCCESS_FOLDER') }}" placeholder="Photos-Uploaded (folder in the share)"></label>
+      <label>Move failed files to<input name="SMB_FAILED_FOLDER" value="{{ vals.get('SMB_FAILED_FOLDER') }}" placeholder="Leave blank to keep in place"></label>
+    </div>
+    <p class="help">You can paste a full address such as <code>\\192.168.1.20\Photos\Events</code> or <code>smb://nas/Photos</code> into the server field. Move-to folders are paths inside the same share and only apply when <a href="{{ url_for('settings_page') }}">General → After successful upload</a> is set to <em>move</em>.</p>
+  </section>
+
+  <section class="card" data-source-panel="local">
+    <h2>Folder Mounted on This Server</h2>
+    <p class="help">For a share you have already mounted on this server yourself (for example an NFS mount at <code>/mnt/nas/photos</code>). Files are read in place.</p>
+    <div class="form-grid">
+      <label>Folder path<input name="LOCAL_SOURCE_PATH" value="{{ vals.get('LOCAL_SOURCE_PATH') }}" placeholder="/mnt/nas/photos"></label>
+      <label class="check"><input type="checkbox" name="LOCAL_SOURCE_RECURSIVE" {% if vals.get('LOCAL_SOURCE_RECURSIVE') != 'false' %}checked{% endif %}> Include subfolders</label>
+      <label>Move uploaded files to<input name="LOCAL_SUCCESS_FOLDER" value="{{ vals.get('LOCAL_SUCCESS_FOLDER') }}" placeholder="/mnt/nas/photos-uploaded"></label>
+      <label>Move failed files to<input name="LOCAL_FAILED_FOLDER" value="{{ vals.get('LOCAL_FAILED_FOLDER') }}" placeholder="Leave blank to keep in place"></label>
+    </div>
+  </section>
+  <button class="btn btn-primary">Save Source</button>
+</form>
+
+<section class="card" data-source-panel="smb">
+  <div class="section-head folder-browser-heading">
+    <div>
+      <h2>Share Folder Browser</h2>
+      {% if smb_display %}<div class="crumbs"><span>\\{{ vals.get('SMB_SERVER') }}\{{ vals.get('SMB_SHARE') }}{% if smb_browse %}\{{ smb_browse|replace('/', '\\') }}{% endif %}</span></div>{% endif %}
+    </div>
+    {% if smb_parent is not none %}<a class="btn btn-sm" href="{{ url_for('source_page', smb_browse=smb_parent) }}">Up one level</a>{% endif %}
+  </div>
+  <div class="folder-list">
+    {% if source_type != 'smb' or not smb_display %}
+    <div class="empty">Enter the NAS server, shared folder, username and password, then click Save Source to browse the share.</div>
+    {% elif smb_error %}
+    <div class="empty">{{ smb_error }}</div>
+    {% else %}
+    {% if smb_browse %}
+    <div class="folder-row {% if smb_browse == vals.get('SMB_FOLDER') %}selected{% endif %}">
+      <span class="folder-icon">🗄</span>
+      <div><strong>This folder</strong><small>{{ smb_browse }}</small></div>
+      <form method="post" action="{{ url_for('source_select_smb') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="path" value="{{ smb_browse }}"><button class="btn btn-sm btn-primary">Use this folder</button></form>
+    </div>
+    {% endif %}
+    {% for d in smb_dirs %}
+    <div class="folder-row {% if d.path == vals.get('SMB_FOLDER') %}selected{% endif %}">
+      <span class="folder-icon">📁</span>
+      <div><strong>{{ d.name }}</strong><small>{{ d.path }}</small></div>
+      <div class="actions">
+        <a class="btn btn-sm" href="{{ url_for('source_page', smb_browse=d.path) }}">Open</a>
+        <form method="post" action="{{ url_for('source_select_smb') }}">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="path" value="{{ d.path }}">
+          <button class="btn btn-sm btn-primary">Use this folder</button>
+        </form>
+      </div>
+    </div>
+    {% else %}
+    <div class="empty">No subfolders here.</div>
+    {% endfor %}
+    {% endif %}
+  </div>
+</section>
+
+<section class="card" data-source-panel="local">
+  <div class="section-head folder-browser-heading">
+    <div>
+      <h2>Server Folder Browser</h2>
+      <div class="crumbs"><span>{{ browse_path }}</span></div>
+    </div>
+    {% if browse_parent %}<a class="btn btn-sm" href="{{ url_for('source_page', browse=browse_parent) }}">Up one level</a>{% endif %}
+  </div>
+  <div class="folder-list">
+    {% if browse_error %}<div class="empty">{{ browse_error }}</div>{% endif %}
+    {% for d in local_dirs %}
+    <div class="folder-row {% if d.path == vals.get('LOCAL_SOURCE_PATH') %}selected{% endif %}">
+      <span class="folder-icon">🗄</span>
+      <div><strong>{{ d.name }}</strong><small>{{ d.path }}</small></div>
+      <div class="actions">
+        <a class="btn btn-sm" href="{{ url_for('source_page', browse=d.path) }}">Open</a>
+        <form method="post" action="{{ url_for('source_select_local') }}">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="path" value="{{ d.path }}">
+          <button class="btn btn-sm btn-primary">Use this folder</button>
+        </form>
+      </div>
+    </div>
+    {% else %}
+    {% if not browse_error %}<div class="empty">No subfolders here.</div>{% endif %}
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
