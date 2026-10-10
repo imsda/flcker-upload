@@ -1,0 +1,84 @@
+{% extends 'base.html' %}
+{% block heading %}Media Source{% endblock %}
+{% block subheading %}Choose where the publisher pulls photos and videos from.{% endblock %}
+{% block content %}
+{% set source_type = vals.get('SOURCE_TYPE') or 'google_drive' %}
+<section class="card prominent">
+  <div class="section-head">
+    <div>
+      <h2>Current Source</h2>
+      {% if source_type == 'local' %}
+      <p>Local/NAS folder: <code>{{ vals.get('LOCAL_SOURCE_PATH') or 'No folder set' }}</code></p>
+      {% set label='Configured' if vals.get('LOCAL_SOURCE_PATH') else 'Missing' %}
+      {% set variant='success' if vals.get('LOCAL_SOURCE_PATH') else 'warning' %}
+      {% else %}
+      <p>Google Drive: {{ vals.get('GOOGLE_DRIVE_FOLDER_NAME') or vals.get('GOOGLE_DRIVE_FOLDER_ID') or 'No folder selected' }}</p>
+      {% set label='Configured' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'Missing' %}
+      {% set variant='success' if vals.get('GOOGLE_DRIVE_FOLDER_ID') else 'warning' %}
+      {% endif %}
+      {% include 'components/badge.html' %}
+    </div>
+    <div class="actions">
+      <form method="post" action="{{ url_for('source_test') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <button class="btn">Test Source</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<form method="post" action="{{ url_for('source_page') }}" class="settings-form">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <section class="card">
+    <h2>Pull Media From</h2>
+    <div class="radio-row">
+      <label class="radio-pill"><input type="radio" name="SOURCE_TYPE" value="google_drive" {% if source_type != 'local' %}checked{% endif %}> Google Drive folder</label>
+      <label class="radio-pill"><input type="radio" name="SOURCE_TYPE" value="local" {% if source_type == 'local' %}checked{% endif %}> Local / NAS folder</label>
+    </div>
+    <p class="help">Google Drive folders are chosen on the <a href="{{ url_for('drive_page') }}">Drive</a> page. A Google account is still needed for the Calendar, whichever source you pick.</p>
+  </section>
+
+  <section class="card">
+    <h2>Local / NAS Folder</h2>
+    <p class="help">Mount the NAS share on this server first (for example an SMB or NFS mount at <code>/mnt/nas/photos</code>), then enter the mounted path. Files are read in place; nothing is copied to the staging area.</p>
+    <div class="form-grid">
+      <label>Folder path<input name="LOCAL_SOURCE_PATH" value="{{ vals.get('LOCAL_SOURCE_PATH') }}" placeholder="/mnt/nas/photos"></label>
+      <label class="check"><input type="checkbox" name="LOCAL_SOURCE_RECURSIVE" {% if vals.get('LOCAL_SOURCE_RECURSIVE') != 'false' %}checked{% endif %}> Include subfolders</label>
+      <label>Move uploaded files to<input name="LOCAL_SUCCESS_FOLDER" value="{{ vals.get('LOCAL_SUCCESS_FOLDER') }}" placeholder="/mnt/nas/photos-uploaded"></label>
+      <label>Move failed files to<input name="LOCAL_FAILED_FOLDER" value="{{ vals.get('LOCAL_FAILED_FOLDER') }}" placeholder="Leave blank to keep in place"></label>
+    </div>
+    <p class="help">"Move uploaded files" only applies when <a href="{{ url_for('settings_page') }}">General → After successful upload</a> is set to <em>move</em>. Moving needs write access to the share.</p>
+  </section>
+  <button class="btn btn-primary">Save Source</button>
+</form>
+
+<section class="card">
+  <div class="section-head folder-browser-heading">
+    <div>
+      <h2>Folder Browser</h2>
+      <div class="crumbs"><span>{{ browse_path }}</span></div>
+    </div>
+    {% if browse_parent %}<a class="btn btn-sm" href="{{ url_for('source_page', browse=browse_parent) }}">Up one level</a>{% endif %}
+  </div>
+  <p class="help">Browse folders on this server to find the mounted NAS share.</p>
+  <div class="folder-list">
+    {% if browse_error %}<div class="empty">{{ browse_error }}</div>{% endif %}
+    {% for d in local_dirs %}
+    <div class="folder-row {% if d.path == vals.get('LOCAL_SOURCE_PATH') %}selected{% endif %}">
+      <span class="folder-icon">🗄</span>
+      <div><strong>{{ d.name }}</strong><small>{{ d.path }}</small></div>
+      <div class="actions">
+        <a class="btn btn-sm" href="{{ url_for('source_page', browse=d.path) }}">Open</a>
+        <form method="post" action="{{ url_for('source_select_local') }}">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="path" value="{{ d.path }}">
+          <button class="btn btn-sm btn-primary">Use this folder</button>
+        </form>
+      </div>
+    </div>
+    {% else %}
+    {% if not browse_error %}<div class="empty">No subfolders here.</div>{% endif %}
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

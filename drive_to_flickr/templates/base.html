@@ -4,24 +4,25 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='imsda-20260721-4') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='imsda-20261010-1') }}">
 </head>
 <body>
 <div class="app-shell">
   <header class="site-header">
     <div class="header-inner">
-      <a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon">IM</span><span><strong>{{ app_name }}</strong><small>IMSDA · Automated Google Drive → Flickr Publishing</small></span></a>
+      <a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon">IM</span><span><strong>{{ app_name }}</strong><small>IMSDA · Automated Drive/NAS → Flickr Publishing</small></span></a>
       <nav class="nav" aria-label="Primary navigation">
         <div class="nav-group"><a class="{{ 'active' if request.endpoint == 'dashboard' else '' }}" href="{{ url_for('dashboard') }}">⌂ Dashboard</a></div>
         <span class="nav-label">Connections</span>
         <div class="nav-group">
           <a class="{{ 'active' if request.endpoint == 'google_account' else '' }}" href="{{ url_for('google_account') }}">● Google Account</a>
+          <a class="{{ 'active' if request.endpoint == 'source_page' else '' }}" href="{{ url_for('source_page') }}">⇪ Source</a>
           <a class="{{ 'active' if request.endpoint == 'drive_page' else '' }}" href="{{ url_for('drive_page') }}">▣ Drive</a>
           <a class="{{ 'active' if request.endpoint == 'calendar_page' else '' }}" href="{{ url_for('calendar_page') }}">◷ Calendar</a>
           <a class="{{ 'active' if request.endpoint == 'flickr_page' else '' }}" href="{{ url_for('flickr_page') }}">◉ Flickr</a>
         </div>
         <span class="nav-label">Admin</span>
-        <div class="nav-group"><a class="{{ 'active' if request.endpoint == 'settings_page' else '' }}" href="{{ url_for('settings_page') }}">⚙ General</a><a class="{{ 'active' if request.endpoint == 'setup' else '' }}" href="{{ url_for('setup') }}">◆ Setup</a></div>
+        <div class="nav-group"><a class="{{ 'active' if request.endpoint == 'settings_page' else '' }}" href="{{ url_for('settings_page') }}">⚙ General</a><a class="{{ 'active' if request.endpoint == 'setup' else '' }}" href="{{ url_for('setup') }}">◆ Setup</a><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="btn btn-sm" type="submit">Sign out</button></form></div>
       </nav>
     </div>
   </header>
@@ -31,6 +32,6 @@
     {% block content %}{% endblock %}
   </main>
 </div>
-<script src="{{ url_for('static', filename='js/app.js', v='imsda-20260721-4') }}" defer></script>
+<script src="{{ url_for('static', filename='js/app.js', v='imsda-20261010-1') }}" defer></script>
 </body>
 </html>

@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 import requests
 from oauthlib.oauth1 import Client as OAuth1Client
 from requests_oauthlib import OAuth1Session
+from requests_toolbelt import MultipartEncoder
 
 from .matcher import normalize_album_name
 
@@ -18,6 +19,10 @@ REQUEST_TOKEN_URL = "https://www.flickr.com/services/oauth/request_token"
 AUTHORIZE_URL = "https://www.flickr.com/services/oauth/authorize"
 ACCESS_TOKEN_URL = "https://www.flickr.com/services/oauth/access_token"
 
+# flickr.photosets.addPhoto error codes
+PHOTOSET_NOT_FOUND = 1
+PHOTO_ALREADY_IN_SET = 3
+
 PRIVACY_MAP = {
     "public": {"is_public": "1", "is_friend": "0", "is_family": "0"},
     "private": {"is_public": "0", "is_friend": "0", "is_family": "0"},
@@ -25,6 +30,12 @@ PRIVACY_MAP = {
     "family": {"is_public": "0", "is_friend": "0", "is_family": "1"},
     "friends-and-family": {"is_public": "0", "is_friend": "1", "is_family": "1"},
 }
+
+
+class FlickrAPIError(RuntimeError):
+    def __init__(self, code: int | None, message: str) -> None:
+        super().__init__(f"Flickr API error {code}: {message}")
+        self.code = code
 
 
 class FlickrClient:
@@ -52,7 +63,8 @@ class FlickrClient:
         response.raise_for_status()
         data = response.json()
         if data.get("stat") != "ok":
-            raise RuntimeError(f"Flickr API error {data.get('code')}: {data.get('message')}")
+            code = data.get("code")
+            raise FlickrAPIError(int(code) if code is not None else None, str(data.get("message")))
         return dict(data)
 
     def upload(self, path: Path, *, title: str, description: str | None, tags: tuple[str, ...], privacy: str, date_taken: str | None = None) -> str:
@@ -70,12 +82,14 @@ class FlickrClient:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         with path.open("rb") as fh:
+            # Stream the body from disk; building it in memory would need RAM equal
+            # to the file size, which matters for large videos.
+            body = MultipartEncoder(fields={**data, "photo": (path.name, fh, "application/octet-stream")})
             response = self.upload_session.post(
                 UPLOAD_URL,
-                data=data,
-                files={"photo": fh},
-                headers={"Authorization": signed_headers["Authorization"]},
-                timeout=300,
+                data=body,
+                headers={"Authorization": signed_headers["Authorization"], "Content-Type": body.content_type},
+                timeout=(30, 600),
             )
         try:
             root = ElementTree.fromstring(response.text)
@@ -97,23 +111,31 @@ class FlickrClient:
         return str(photo_id)
 
     def list_photosets(self) -> dict[str, tuple[str, str]]:
-        data = self._call("flickr.photosets.getList")
         result: dict[str, tuple[str, str]] = {}
-        for ps in data.get("photosets", {}).get("photoset", []):
-            title = ps.get("title", {}).get("_content", "")
-            result[normalize_album_name(title)] = (ps["id"], title)
-        return result
+        page = 1
+        while True:
+            data = self._call("flickr.photosets.getList", page=str(page), per_page="500")
+            photosets = data.get("photosets", {})
+            for ps in photosets.get("photoset", []):
+                title = ps.get("title", {}).get("_content", "")
+                result.setdefault(normalize_album_name(title), (ps["id"], title))
+            if page >= int(photosets.get("pages", 1) or 1):
+                return result
+            page += 1
 
     def create_photoset(self, title: str, primary_photo_id: str) -> str:
         data = self._call("flickr.photosets.create", title=title, primary_photo_id=primary_photo_id)
         return str(data["photoset"]["id"])
 
     def add_photo_to_photoset(self, photoset_id: str, photo_id: str) -> None:
-        self._call("flickr.photosets.addPhoto", photoset_id=photoset_id, photo_id=photo_id)
+        try:
+            self._call("flickr.photosets.addPhoto", photoset_id=photoset_id, photo_id=photo_id)
+        except FlickrAPIError as exc:
+            if exc.code != PHOTO_ALREADY_IN_SET:
+                raise
 
     def find_uploaded_by_drive_id(self, drive_file_id: str) -> str | None:
-        tag = f"drive-to-flickr:id={hashlib.sha256(drive_file_id.encode()).hexdigest()[:24]}"
-        data = self._call("flickr.photos.search", user_id="me", tags=tag, extras="tags")
+        data = self._call("flickr.photos.search", user_id="me", tags=drive_id_tag(drive_file_id), extras="tags")
         photos = data.get("photos", {}).get("photo", [])
         return str(photos[0]["id"]) if photos else None
 

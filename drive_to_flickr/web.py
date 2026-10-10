@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import secrets as pysecrets
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta
 from functools import wraps
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
 from requests_oauthlib import OAuth1Session
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash
@@ -17,19 +22,81 @@ from .database import Database, now
 from .flickr import ACCESS_TOKEN_URL, AUTHORIZE_URL, REQUEST_TOKEN_URL, FlickrClient
 from .google_ui import GoogleOAuthConfigError, account_email, configured as google_oauth_configured, flow_for, list_calendars, list_folders, test_calendar, test_folder
 from .health import worker_health
+from .metadata import detect_media_kind
 from .models import Status
 from .secrets import SecretStore
 from .settings_store import SettingsStore, validate_settings
+from .sources import LocalFolderSource
+
+LOGGER = logging.getLogger(__name__)
+
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+LOCAL_BROWSE_LIMIT = 500
+
+
+def default_browse_path() -> str:
+    for candidate in ("/mnt", "/media", "/srv"):
+        if Path(candidate).is_dir():
+            return candidate
+    return "/"
+
+
+def browse_local(path: str) -> tuple[list[dict[str, str]], str, str | None]:
+    """Subfolders of ``path`` for the folder picker, plus an error message and parent path."""
+    target = Path(os.path.normpath(path or "/"))
+    if not target.is_absolute():
+        return [], "Enter an absolute path such as /mnt/nas/photos.", None
+    parent = str(target.parent) if target.parent != target else None
+    try:
+        entries = sorted((e for e in os.scandir(target) if e.is_dir() and not e.name.startswith((".", "@"))), key=lambda e: e.name.lower())
+    except FileNotFoundError:
+        return [], f"{target} does not exist on this server.", parent
+    except PermissionError:
+        return [], f"The service account cannot read {target}.", parent
+    except NotADirectoryError:
+        return [], f"{target} is not a folder.", parent
+    return [{"name": e.name, "path": e.path} for e in entries[:LOCAL_BROWSE_LIMIT]], "", parent
+
+
+def source_configured(vals: dict[str, str]) -> bool:
+    if vals.get("SOURCE_TYPE") == "local":
+        return bool(vals.get("LOCAL_SOURCE_PATH"))
+    return bool(vals.get("GOOGLE_DRIVE_FOLDER_ID"))
+
+
+def source_name(vals: dict[str, str]) -> str:
+    if vals.get("SOURCE_TYPE") == "local":
+        return vals.get("LOCAL_SOURCE_PATH") or ""
+    return vals.get("GOOGLE_DRIVE_FOLDER_NAME") or vals.get("GOOGLE_DRIVE_FOLDER_ID") or ""
 
 
 def create_app() -> Flask:
     settings = load_settings(require_credentials=False)
     app = Flask(__name__)
+    if not settings.web_secret_key:
+        LOGGER.warning("WEB_SECRET_KEY is not set; using a temporary key, so logins will reset whenever the web UI restarts")
     app.secret_key = settings.web_secret_key or pysecrets.token_hex(32)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        # Enable when the UI is only reached over HTTPS (recommended behind a reverse proxy).
+        SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"},
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+    )
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
     db = Database(settings.database_path)
     store = SettingsStore(db)
     secret_store = SecretStore(settings.secret_store_path)
+    login_failures: dict[str, list[float]] = {}
+    login_lock = threading.Lock()
+
+    def recent_failures(ip: str) -> list[float]:
+        cutoff = time.monotonic() - LOGIN_LOCKOUT_SECONDS
+        with login_lock:
+            attempts = [t for t in login_failures.get(ip, []) if t > cutoff]
+            login_failures[ip] = attempts
+            return attempts
 
     def csrf() -> str:
         session.setdefault("csrf", pysecrets.token_urlsafe(32))
@@ -37,7 +104,7 @@ def create_app() -> Flask:
 
     @app.context_processor
     def inject_globals():
-        return {"csrf_token": csrf, "app_name": "Drive to Flickr", "app_subtitle": "Automated Google Drive → Flickr media publishing"}
+        return {"csrf_token": csrf, "app_name": "Drive to Flickr", "app_subtitle": "Automated Google Drive / NAS → Flickr media publishing"}
 
     @app.template_filter("local_datetime")
     def local_datetime(value: str | None) -> str:
@@ -45,7 +112,9 @@ def create_app() -> Flask:
             return "—"
         try:
             parsed = datetime.fromisoformat(value)
-            timezone = ZoneInfo(store.get("TIMEZONE", "UTC"))
+            if "display_timezone" not in g:
+                g.display_timezone = ZoneInfo(store.get("TIMEZONE", "UTC"))
+            timezone = g.display_timezone
             return parsed.astimezone(timezone).strftime("%Y-%m-%d %I:%M:%S %p %Z")
         except (ValueError, ZoneInfoNotFoundError):
             return value
@@ -113,6 +182,7 @@ def create_app() -> Flask:
         health = worker_health(vals.get("WORKER_HEARTBEAT", ""), poll_interval, display_timezone=display_timezone)
         return {"vals": vals, "google_connected": google_connected, "flickr_connected": flickr_connected,
                 "drive_connected": bool(vals.get("GOOGLE_DRIVE_FOLDER_ID")), "calendar_connected": bool(vals.get("GOOGLE_CALENDAR_ID")),
+                "source_configured": source_configured(vals), "source_name": source_name(vals), "source_is_local": vals.get("SOURCE_TYPE") == "local",
                 "worker_health": health}
 
     def upload_metrics() -> dict[str, int]:
@@ -127,12 +197,13 @@ def create_app() -> Flask:
         with db.connect() as conn:
             return [dict(r) for r in conn.execute("SELECT google_drive_file_id, google_drive_name, media_captured_at, calendar_event_title, flickr_photoset_id, status, attempts, last_error, updated_at FROM processed_files ORDER BY updated_at DESC LIMIT 10")]
 
-    def config_warnings() -> list[dict[str, str]]:
-        d = dashboard_data(); vals = d["vals"]
+    def config_warnings(d: dict) -> list[dict[str, str]]:
+        vals = d["vals"]
         warnings = []
         if not google_oauth_configured(secret_store, settings.google_credentials_file): warnings.append({"title": "Google OAuth Not Configured", "message": "Google OAuth not configured", "detail": "Add your Google OAuth Client ID and Client Secret before connecting Google services.", "action": "Configure OAuth", "href": url_for("google_account")})
         if not d["google_connected"]: warnings.append({"title": "Google Account Not Connected", "message": "Google account is not connected.", "detail": "Connect a Google account to browse shared Drive folders and Calendars.", "action": "Connect Google", "href": url_for("google_account")})
-        if not vals.get("GOOGLE_DRIVE_FOLDER_ID"): warnings.append({"title": "Drive Folder Missing", "message": "No Google Drive folder has been selected.", "detail": "Choose the Drive folder that Drive to Flickr should watch for new media.", "action": "Select Drive Folder", "href": url_for("drive_page")})
+        if d["source_is_local"] and not vals.get("LOCAL_SOURCE_PATH"): warnings.append({"title": "Local Folder Missing", "message": "No local/NAS folder has been set.", "detail": "Enter the mounted NAS folder that Drive to Flickr should watch for new media.", "action": "Set Media Source", "href": url_for("source_page")})
+        if not d["source_is_local"] and not vals.get("GOOGLE_DRIVE_FOLDER_ID"): warnings.append({"title": "Drive Folder Missing", "message": "No Google Drive folder has been selected.", "detail": "Choose the Drive folder that Drive to Flickr should watch for new media.", "action": "Select Drive Folder", "href": url_for("drive_page")})
         if not vals.get("GOOGLE_CALENDAR_ID"): warnings.append({"title": "Calendar Missing", "message": "No Calendar has been selected.", "detail": "Select the Google Calendar used to map capture times to Flickr albums.", "action": "Select Calendar", "href": url_for("calendar_page")})
         if not d["flickr_connected"]: warnings.append({"title": "Flickr Disconnected", "message": "Flickr has not been connected.", "detail": "Connect Flickr so processed Drive media can be published to albums.", "action": "Connect Flickr", "href": url_for("flickr_page")})
         if d["worker_health"]["status"] != "Running": warnings.append({"title": "Publisher Worker " + d["worker_health"]["status"], "message": "The publisher worker is not reporting as running.", "detail": "Start or restart the drive-to-flickr worker service. " + d["worker_health"]["detail"], "action": "", "href": ""})
@@ -145,15 +216,33 @@ def create_app() -> Flask:
     @app.post("/login")
     def do_login():
         check_csrf()
-        if request.form.get("username") == settings.admin_username and check_password_hash(settings.admin_password_hash, request.form.get("password", "")):
+        ip = request.remote_addr or "unknown"
+        if len(recent_failures(ip)) >= LOGIN_MAX_FAILURES:
+            return render_template("login.html", error="Too many failed sign-in attempts. Wait 15 minutes and try again."), 429
+        if settings.admin_password_hash and pysecrets.compare_digest(request.form.get("username", ""), settings.admin_username) and check_password_hash(settings.admin_password_hash, request.form.get("password", "")):
+            with login_lock:
+                login_failures.pop(ip, None)
+            session.clear()  # new session on login so a pre-login session ID can't be reused
+            session.permanent = True
             session["auth"] = True
+            session["csrf"] = pysecrets.token_urlsafe(32)
             return redirect(url_for("dashboard"))
-        abort(403)
+        with login_lock:
+            login_failures.setdefault(ip, []).append(time.monotonic())
+        LOGGER.warning("Failed admin sign-in from %s", ip)
+        return render_template("login.html", error="Incorrect username or password."), 401
+
+    @app.post("/logout")
+    @login_required
+    def logout():
+        session.clear()
+        return redirect(url_for("login"))
 
     @app.get("/")
     @login_required
     def dashboard():
-        return render_template("dashboard.html", **dashboard_data(), metrics=upload_metrics(), activity=recent_activity(), warnings=config_warnings())
+        data = dashboard_data()
+        return render_template("dashboard.html", **data, metrics=upload_metrics(), activity=recent_activity(), warnings=config_warnings(data))
 
     @app.post("/activity/<file_id>/retry")
     @login_required
@@ -177,13 +266,70 @@ def create_app() -> Flask:
     @app.route("/settings", methods=["GET", "POST"])
     @login_required
     def settings_page():
-        keys = ["PUBLIC_BASE_URL","TIMEZONE","POLL_INTERVAL_SECONDS","MINIMUM_FILE_AGE_SECONDS","MAX_ATTEMPTS","LOG_LEVEL","BUFFER_BEFORE_MINUTES","BUFFER_AFTER_MINUTES","REQUIRE_FLICKR_MARKER","NO_EVENT_ACTION","UNASSIGNED_ALBUM","DRIVE_SUCCESS_ACTION","DRIVE_SUCCESS_FOLDER","DRIVE_FAILED_FOLDER","FLICKR_DEFAULT_PRIVACY","GLOBAL_TAGS"]
+        keys = ["PUBLIC_BASE_URL","TIMEZONE","POLL_INTERVAL_SECONDS","WORKER_CONCURRENCY","MINIMUM_FILE_AGE_SECONDS","MAX_ATTEMPTS","LOG_LEVEL","BUFFER_BEFORE_MINUTES","BUFFER_AFTER_MINUTES","REQUIRE_FLICKR_MARKER","NO_EVENT_ACTION","UNASSIGNED_ALBUM","DRIVE_SUCCESS_ACTION","DRIVE_SUCCESS_FOLDER","DRIVE_FAILED_FOLDER","FLICKR_DEFAULT_PRIVACY","GLOBAL_TAGS"]
         if request.method == "POST":
             vals = {k: request.form.get(k, "") for k in keys}; vals["REQUIRE_FLICKR_MARKER"] = "true" if request.form.get("REQUIRE_FLICKR_MARKER") else "false"
             errs = validate_settings(store.all_public() | vals)
             if errs: flash("; ".join(errs), "error")
             else: store.update(vals); flash("Settings saved", "success")
         return render_template("settings/general.html", vals=store.all_public())
+
+    @app.route("/settings/source", methods=["GET", "POST"])
+    @login_required
+    def source_page():
+        if request.method == "POST":
+            vals = {
+                "SOURCE_TYPE": request.form.get("SOURCE_TYPE", "google_drive"),
+                "LOCAL_SOURCE_PATH": request.form.get("LOCAL_SOURCE_PATH", "").strip(),
+                "LOCAL_SOURCE_RECURSIVE": "true" if request.form.get("LOCAL_SOURCE_RECURSIVE") else "false",
+                "LOCAL_SUCCESS_FOLDER": request.form.get("LOCAL_SUCCESS_FOLDER", "").strip(),
+                "LOCAL_FAILED_FOLDER": request.form.get("LOCAL_FAILED_FOLDER", "").strip(),
+            }
+            errs = validate_settings(store.all_public() | vals)
+            if errs:
+                flash("; ".join(errs), "error")
+            else:
+                store.update(vals)
+                flash("Media source saved. The worker uses it from its next scan.", "success")
+            return redirect(url_for("source_page"))
+        vals = store.all_public()
+        browse_path = request.args.get("browse") or vals.get("LOCAL_SOURCE_PATH") or default_browse_path()
+        local_dirs, browse_error, browse_parent = browse_local(browse_path)
+        return render_template("settings/source.html", vals=vals, browse_path=browse_path, local_dirs=local_dirs, browse_error=browse_error, browse_parent=browse_parent)
+
+    @app.post("/settings/source/select-local")
+    @login_required
+    def source_select_local():
+        vals = {"SOURCE_TYPE": "local", "LOCAL_SOURCE_PATH": request.form.get("path", "").strip()}
+        errs = validate_settings(store.all_public() | vals)
+        if errs:
+            flash("; ".join(errs), "error")
+        else:
+            store.update(vals)
+            flash(f"Now pulling media from {vals['LOCAL_SOURCE_PATH']}", "success")
+        return redirect(url_for("source_page"))
+
+    def check_local_source(vals: dict[str, str]) -> str:
+        source = LocalFolderSource(Path(vals.get("LOCAL_SOURCE_PATH", "")), recursive=vals.get("LOCAL_SOURCE_RECURSIVE") != "false")
+        media = [f for f in source.list_media_files() if detect_media_kind(Path(f.name)) is not None]
+        return f"Folder readable: {len(media)} photo/video file(s) found"
+
+    @app.post("/settings/source/test")
+    @login_required
+    def source_test():
+        vals = store.all_public()
+        try:
+            if vals.get("SOURCE_TYPE") == "local":
+                if not vals.get("LOCAL_SOURCE_PATH"):
+                    raise ValueError("No local/NAS folder has been set.")
+                flash(check_local_source(vals), "success")
+            else:
+                meta = test_folder(secret_store, vals.get("GOOGLE_DRIVE_FOLDER_ID", ""))
+                flash("Drive folder accessible: " + meta.get("name", ""), "success")
+        except Exception as exc:
+            app.logger.warning("Media source check failed: %s", exc)
+            flash(friendly_google_error(exc) if vals.get("SOURCE_TYPE") != "local" else str(exc), "error")
+        return redirect(url_for("source_page"))
 
     @app.get("/settings/google-account")
     @login_required
@@ -326,21 +472,40 @@ def create_app() -> Flask:
     @app.post("/settings/flickr/connect")
     @login_required
     def flickr_connect():
-        oauth = OAuth1Session(store.get("FLICKR_API_KEY"), client_secret=secret_store.get("flickr_api_secret"), callback_uri=flickr_callback_url())
-        tok = oauth.fetch_request_token(REQUEST_TOKEN_URL); state = pysecrets.token_urlsafe(24); db.save_oauth_state(state, "flickr", tok["oauth_token_secret"]); session["flickr_state"] = state
-        return redirect(oauth.authorization_url(AUTHORIZE_URL, perms="write"))
+        try:
+            oauth = OAuth1Session(store.get("FLICKR_API_KEY"), client_secret=secret_store.get("flickr_api_secret"), callback_uri=flickr_callback_url())
+            tok = oauth.fetch_request_token(REQUEST_TOKEN_URL); state = pysecrets.token_urlsafe(24); db.save_oauth_state(state, "flickr", tok["oauth_token_secret"]); session["flickr_state"] = state
+            return redirect(oauth.authorization_url(AUTHORIZE_URL, perms="write"))
+        except Exception as exc:
+            app.logger.warning("Flickr connect failed: %s", exc)
+            flash("Flickr rejected the request. Check the API key and secret, then try again.", "error")
+            return redirect(url_for("flickr_page"))
 
     @app.get("/oauth/flickr/callback")
     @login_required
     def flickr_callback():
         state = session.pop("flickr_state", ""); ok, verifier_secret = db.pop_oauth_state(state, "flickr")
         if not ok or not verifier_secret: abort(403)
-        oauth = OAuth1Session(store.get("FLICKR_API_KEY"), client_secret=secret_store.get("flickr_api_secret"), resource_owner_key=request.args["oauth_token"], resource_owner_secret=verifier_secret, verifier=request.args["oauth_verifier"])
-        access = oauth.fetch_access_token(ACCESS_TOKEN_URL); secret_store.set("flickr_oauth_token", access["oauth_token"]); secret_store.set("flickr_oauth_token_secret", access["oauth_token_secret"]); store.set("FLICKR_USERNAME", access.get("username", "")); store.set("FLICKR_LAST_API_CHECK", now()); flash("Flickr connected", "success"); return redirect(url_for("flickr_page"))
+        if not request.args.get("oauth_token") or not request.args.get("oauth_verifier"):
+            flash("Flickr authorization was cancelled or denied.", "error"); return redirect(url_for("flickr_page"))
+        try:
+            oauth = OAuth1Session(store.get("FLICKR_API_KEY"), client_secret=secret_store.get("flickr_api_secret"), resource_owner_key=request.args["oauth_token"], resource_owner_secret=verifier_secret, verifier=request.args["oauth_verifier"])
+            access = oauth.fetch_access_token(ACCESS_TOKEN_URL)
+        except Exception as exc:
+            app.logger.warning("Flickr token exchange failed: %s", exc)
+            flash("Flickr authorization could not be completed. Try connecting again.", "error"); return redirect(url_for("flickr_page"))
+        secret_store.set("flickr_oauth_token", access["oauth_token"]); secret_store.set("flickr_oauth_token_secret", access["oauth_token_secret"]); store.set("FLICKR_USERNAME", access.get("username", "")); store.set("FLICKR_LAST_API_CHECK", now()); flash("Flickr connected", "success"); return redirect(url_for("flickr_page"))
 
     @app.post("/settings/flickr/test")
     @login_required
-    def flickr_test(): FlickrClient(store.get("FLICKR_API_KEY"), secret_store.get("flickr_api_secret"), secret_store.get("flickr_oauth_token"), secret_store.get("flickr_oauth_token_secret")).list_photosets(); store.set("FLICKR_LAST_API_CHECK", now()); flash("Flickr API check succeeded", "success"); return redirect(url_for("flickr_page"))
+    def flickr_test():
+        try:
+            FlickrClient(store.get("FLICKR_API_KEY"), secret_store.get("flickr_api_secret"), secret_store.get("flickr_oauth_token"), secret_store.get("flickr_oauth_token_secret")).list_photosets()
+            store.set("FLICKR_LAST_API_CHECK", now()); flash("Flickr API check succeeded", "success")
+        except Exception as exc:
+            app.logger.warning("Flickr API check failed: %s", exc)
+            flash("Flickr API check failed. Reconnect Flickr or check the API key and secret.", "error")
+        return redirect(url_for("flickr_page"))
 
     @app.post("/settings/flickr/disconnect")
     @login_required
@@ -354,13 +519,14 @@ def create_app() -> Flask:
             test_results = json.loads(vals.get("SETUP_TEST_RESULTS", "[]"))
         except (TypeError, ValueError):
             test_results = []
-        return render_template("setup/index.html", vals=vals, callback=google_callback_url(), app_configured=google_oauth_configured(secret_store, settings.google_credentials_file), google_connected=secret_store.has("google_token_json"), flickr_connected=secret_store.has("flickr_oauth_token"), test_results=test_results)
+        return render_template("setup/index.html", vals=vals, source_configured=source_configured(vals), source_name=source_name(vals), callback=google_callback_url(), app_configured=google_oauth_configured(secret_store, settings.google_credentials_file), google_connected=secret_store.has("google_token_json"), flickr_connected=secret_store.has("flickr_oauth_token"), test_results=test_results)
 
     @app.post("/setup/finish")
     @login_required
     def setup_finish():
-        if not (secret_store.has("google_token_json") and store.get("GOOGLE_DRIVE_FOLDER_ID") and store.get("GOOGLE_CALENDAR_ID") and secret_store.has("flickr_oauth_token") and store.get("SETUP_LAST_TEST_STATUS") == "success"):
-            flash("Setup cannot be marked complete until Google, Drive, Calendar, and Flickr are configured and Test Configuration passes.", "error"); return redirect(url_for("setup"))
+        vals = store.all_public()
+        if not (secret_store.has("google_token_json") and source_configured(vals) and vals.get("GOOGLE_CALENDAR_ID") and secret_store.has("flickr_oauth_token") and vals.get("SETUP_LAST_TEST_STATUS") == "success"):
+            flash("Setup cannot be marked complete until Google, the media source, Calendar, and Flickr are configured and Test Configuration passes.", "error"); return redirect(url_for("setup"))
         store.set("SETUP_COMPLETE", "true"); flash("Setup complete", "success"); return redirect(url_for("dashboard"))
 
     @app.post("/setup/test-scan")
@@ -384,7 +550,12 @@ def create_app() -> Flask:
             results.append({"name": "Google Account", "ok": False, "detail": "Connect a Google account first."})
 
         folder_id = vals.get("GOOGLE_DRIVE_FOLDER_ID", "")
-        if folder_id:
+        if vals.get("SOURCE_TYPE") == "local":
+            if vals.get("LOCAL_SOURCE_PATH"):
+                check("Local/NAS Folder", lambda: check_local_source(vals), lambda detail: detail)
+            else:
+                results.append({"name": "Local/NAS Folder", "ok": False, "detail": "Set a local/NAS folder first."})
+        elif folder_id:
             check("Google Drive", lambda: test_folder(secret_store, folder_id), lambda meta: f"Folder accessible: {meta.get('name', folder_id)}")
         else:
             results.append({"name": "Google Drive", "ok": False, "detail": "Select a Drive folder first."})
@@ -411,5 +582,7 @@ def create_app() -> Flask:
 
 
 def main() -> None:
+    from waitress import serve  # type: ignore[import-untyped]
+
     settings = load_settings(require_credentials=False)
-    create_app().run(host=settings.web_bind, port=settings.web_port)
+    serve(create_app(), host=settings.web_bind, port=settings.web_port, threads=8)

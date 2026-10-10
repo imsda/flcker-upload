@@ -30,7 +30,11 @@ def parse_event_description(description: str | None) -> EventSettings:
     def minutes(name: str) -> timedelta | None:
         if name not in values:
             return None
-        return timedelta(minutes=int(values[name]))
+        try:
+            return timedelta(minutes=int(values[name]))
+        except ValueError:
+            # A typo in one event description must not break matching for the whole day.
+            return None
     tags = tuple(t.strip() for t in values.get("tags", "").split(",") if t.strip())
     return EventSettings(flickr=flickr, album=values.get("album"), privacy=privacy, tags=tags, description=values.get("description"), buffer_before=minutes("buffer_before"), buffer_after=minutes("buffer_after"))
 

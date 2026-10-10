@@ -321,3 +321,120 @@ def test_google_disconnect_preserves_oauth_app_credentials(client):
 def test_google_oauth_denial_friendly(client):
     resp = client.get('/oauth/google/callback?error=access_denied&error_description=access_denied', follow_redirects=True)
     assert b'Google authorization was denied' in resp.data
+
+
+def store_for_test():
+    return SettingsStore(Database(Path(__import__('os').environ['DATABASE_PATH'])))
+
+
+def test_media_source_page_saves_local_nas_folder(client, tmp_path):
+    nas = tmp_path / 'nas'
+    nas.mkdir()
+    page = client.get('/settings/source')
+    assert page.status_code == 200 and b'Local / NAS folder' in page.data
+    resp = client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': str(nas), 'LOCAL_SOURCE_RECURSIVE': 'on'}, follow_redirects=True)
+    assert b'Media source saved' in resp.data
+    store = store_for_test()
+    assert store.get('SOURCE_TYPE') == 'local'
+    assert store.get('LOCAL_SOURCE_PATH') == str(nas)
+    assert store.get('LOCAL_SOURCE_RECURSIVE') == 'true'
+
+
+def test_media_source_rejects_relative_or_missing_path(client):
+    resp = client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': ''}, follow_redirects=True)
+    assert b'LOCAL_SOURCE_PATH is required' in resp.data
+    resp = client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': 'nas/photos'}, follow_redirects=True)
+    assert b'must be an absolute path' in resp.data
+    assert store_for_test().get('SOURCE_TYPE') == 'google_drive'
+
+
+def test_local_folder_browser_lists_and_selects(client, tmp_path):
+    nas = tmp_path / 'nas'
+    (nas / 'Camp Meeting').mkdir(parents=True)
+    (nas / '.hidden').mkdir()
+    page = client.get('/settings/source?browse=' + str(nas))
+    assert b'Camp Meeting' in page.data
+    assert b'.hidden' not in page.data
+    assert b'does not exist' in client.get('/settings/source?browse=' + str(tmp_path / 'missing')).data
+    resp = client.post('/settings/source/select-local', data={'csrf': csrf(client), 'path': str(nas / 'Camp Meeting')}, follow_redirects=True)
+    assert b'Now pulling media from' in resp.data
+    assert store_for_test().get('LOCAL_SOURCE_PATH') == str(nas / 'Camp Meeting')
+
+
+def test_local_source_test_counts_media(client, tmp_path):
+    nas = tmp_path / 'nas'
+    nas.mkdir()
+    (nas / 'a.jpg').write_bytes(b'x')
+    (nas / 'b.mov').write_bytes(b'x')
+    (nas / 'notes.txt').write_bytes(b'x')
+    store_for_test().update({'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': str(nas)})
+    resp = client.post('/settings/source/test', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert b'2 photo/video file(s) found' in resp.data
+    store_for_test().update({'LOCAL_SOURCE_PATH': str(tmp_path / 'unmounted')})
+    resp = client.post('/settings/source/test', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert b'NAS share is mounted' in resp.data
+
+
+def test_setup_check_and_dashboard_use_local_source(client, tmp_path):
+    nas = tmp_path / 'nas'
+    nas.mkdir()
+    store_for_test().update({'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': str(nas)})
+    dashboard = client.get('/').data
+    assert b'Local/NAS Folder' in dashboard
+    assert b'Drive Folder Missing' not in dashboard
+    resp = client.post('/setup/test-scan', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert b'Local/NAS Folder' in resp.data
+    assert b'Folder readable: 0 photo/video file(s) found' in resp.data
+
+
+def test_failed_login_is_rejected_then_rate_limited(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path)
+    from drive_to_flickr.web import create_app
+    app = create_app(); app.config['TESTING'] = True
+    c = app.test_client()
+    c.get('/login')
+    for _ in range(5):
+        resp = c.post('/login', data={'username': 'admin', 'password': 'wrong', 'csrf': csrf(c)})
+        assert resp.status_code == 401
+        assert b'Incorrect username or password' in resp.data
+    resp = c.post('/login', data={'username': 'admin', 'password': 'pw', 'csrf': csrf(c)})
+    assert resp.status_code == 429
+
+
+def test_logout_ends_session(client):
+    assert client.get('/').status_code == 200
+    client.post('/logout', data={'csrf': csrf(client)})
+    assert client.get('/').status_code == 302
+
+
+def test_flickr_test_failure_is_friendly(client):
+    with patch('drive_to_flickr.web.FlickrClient') as flickr:
+        flickr.return_value.list_photosets.side_effect = RuntimeError('401')
+        resp = client.post('/settings/flickr/test', data={'csrf': csrf(client)}, follow_redirects=True)
+    assert resp.status_code == 200
+    assert b'Flickr API check failed' in resp.data
+
+
+def test_settings_batch_read_honours_env_override(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path)
+    store = SettingsStore(Database(tmp_path/'state.sqlite'))
+    store.set('POLL_INTERVAL_SECONDS', '45')
+    monkeypatch.setenv('TIMEZONE', 'America/Chicago')
+    values = store.all_public()
+    assert values['POLL_INTERVAL_SECONDS'] == '45'
+    assert values['TIMEZONE'] == 'America/Chicago'
+    assert values['SOURCE_TYPE'] == 'google_drive'
+
+
+def test_load_settings_for_local_source_does_not_require_drive_folder(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path)
+    from drive_to_flickr.config import load_settings
+    store = SettingsStore(Database(tmp_path/'state.sqlite'))
+    store.update({'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': '/mnt/nas/photos', 'GOOGLE_CALENDAR_ID': 'cal', 'FLICKR_API_KEY': 'k'})
+    ss = SecretStore(tmp_path/'secrets.json')
+    for key in ('flickr_api_secret', 'flickr_oauth_token', 'flickr_oauth_token_secret'):
+        ss.set(key, 'v')
+    settings = load_settings()
+    assert settings.source_type == 'local'
+    assert settings.local_source_path == Path('/mnt/nas/photos')
+    assert settings.google_drive_folder_id == ''

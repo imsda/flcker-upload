@@ -1,6 +1,7 @@
 """Configuration loading and validation."""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,10 @@ except ModuleNotFoundError:
 VALID_PRIVACY = {"public", "private", "friends", "family", "friends-and-family"}
 VALID_NO_EVENT = {"unassigned", "skip", "manual-review"}
 VALID_DRIVE_ACTION = {"leave", "move"}
+VALID_SOURCE_TYPES = {"google_drive", "local"}
+MAX_WORKER_CONCURRENCY = 8
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,12 @@ class Settings:
     admin_password_hash: str = ""
     secret_store_path: Path = Path("/etc/drive-to-flickr/secrets.json")
     public_base_url: str = ""
+    source_type: str = "google_drive"
+    local_source_path: Path | None = None
+    local_source_recursive: bool = True
+    local_success_folder: Path | None = None
+    local_failed_folder: Path | None = None
+    worker_concurrency: int = 1
 
 
 def _bool(value: str | None, default: bool = False) -> bool:
@@ -90,7 +101,8 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
             "FLICKR_OAUTH_TOKEN": ss.get("flickr_oauth_token"),
             "FLICKR_OAUTH_TOKEN_SECRET": ss.get("flickr_oauth_token_secret"),
         }
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Could not read stored settings from %s; using environment only: %s", db_path, exc)
         db_values = {}
 
     def cfg(name: str, default: str = "") -> str:
@@ -100,9 +112,17 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         tz = ZoneInfo(cfg("TIMEZONE", "UTC"))
     except ZoneInfoNotFoundError as exc:
         raise ValueError("TIMEZONE is not a valid IANA timezone") from exc
-    def required(name: str) -> str:
+    source_type = cfg("SOURCE_TYPE", "google_drive")
+    if source_type not in VALID_SOURCE_TYPES:
+        raise ValueError("SOURCE_TYPE must be google_drive or local")
+
+    def optional_path(name: str) -> Path | None:
+        value = cfg(name).strip()
+        return Path(value) if value else None
+
+    def required(name: str, *, needed: bool = True) -> str:
         value = cfg(name)
-        if require_credentials and not value:
+        if require_credentials and needed and not value:
             raise ValueError(f"Missing required setting: {name}")
         return value or ""
     settings = Settings(
@@ -112,7 +132,7 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         staging_dir=Path(os.getenv("STAGING_DIR", "/var/lib/drive-to-flickr/staging")),
         google_credentials_file=Path(os.getenv("GOOGLE_CREDENTIALS_FILE", "/etc/drive-to-flickr/google-client.json")),
         google_token_file=Path(os.getenv("GOOGLE_TOKEN_FILE", "/etc/drive-to-flickr/google-token.json")),
-        google_drive_folder_id=required("GOOGLE_DRIVE_FOLDER_ID"),
+        google_drive_folder_id=required("GOOGLE_DRIVE_FOLDER_ID", needed=source_type == "google_drive"),
         google_calendar_id=required("GOOGLE_CALENDAR_ID"),
         flickr_api_key=required("FLICKR_API_KEY"),
         flickr_api_secret=required("FLICKR_API_SECRET"),
@@ -138,7 +158,15 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         admin_password_hash=os.getenv("ADMIN_PASSWORD_HASH", ""),
         secret_store_path=Path(os.getenv("SECRET_STORE_PATH", "/etc/drive-to-flickr/secrets.json")),
         public_base_url=cfg("PUBLIC_BASE_URL", ""),
+        source_type=source_type,
+        local_source_path=optional_path("LOCAL_SOURCE_PATH"),
+        local_source_recursive=_bool(cfg("LOCAL_SOURCE_RECURSIVE", "true"), True),
+        local_success_folder=optional_path("LOCAL_SUCCESS_FOLDER"),
+        local_failed_folder=optional_path("LOCAL_FAILED_FOLDER"),
+        worker_concurrency=max(1, min(MAX_WORKER_CONCURRENCY, int(cfg("WORKER_CONCURRENCY", "1")))),
     )
+    if require_credentials and source_type == "local" and settings.local_source_path is None:
+        raise ValueError("Missing required setting: LOCAL_SOURCE_PATH")
     if settings.no_event_action not in VALID_NO_EVENT:
         raise ValueError("NO_EVENT_ACTION must be unassigned, skip, or manual-review")
     if settings.drive_success_action not in VALID_DRIVE_ACTION:
