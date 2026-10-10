@@ -22,7 +22,7 @@ from .processor import Processor
 from .health import record_worker_heartbeat
 from .settings_store import SettingsStore
 from .secrets import SecretStore
-from .sources import GoogleDriveSource, LocalFolderSource, MediaSource
+from .sources import GoogleDriveSource, LocalFolderSource, MediaSource, SMBSource
 
 STOP = False
 HEARTBEAT_INTERVAL_SECONDS = 15
@@ -46,12 +46,20 @@ def google_credentials_for(settings: Settings):
     return stored_google_credentials(secret_store) if secret_store.has("google_token_json") else None
 
 
+def smb_source_from(server: str, share: str, folder: str, username: str, password: str, port: int, recursive: bool = True, success_folder: str = "", failed_folder: str = "") -> SMBSource:
+    # Move-to folders are relative to the share root; exclude them from scanning when they
+    # sit inside the watched folder so moved files are not picked up again.
+    return SMBSource(server, share, folder, username=username, password=password, port=port, recursive=recursive, exclude=(success_folder, failed_folder))
+
+
 def build_source(settings: Settings, google_credentials=None) -> MediaSource:
     if settings.source_type == "local":
         if settings.local_source_path is None:
             raise ValueError("Missing required setting: LOCAL_SOURCE_PATH")
         exclude = tuple(p for p in (settings.local_success_folder, settings.local_failed_folder) if p)
         return LocalFolderSource(settings.local_source_path, recursive=settings.local_source_recursive, exclude=exclude)
+    if settings.source_type == "smb":
+        return smb_source_from(settings.smb_server, settings.smb_share, settings.smb_folder, settings.smb_username, settings.smb_password, settings.smb_port, settings.smb_recursive, settings.smb_success_folder, settings.smb_failed_folder)
     drive = GoogleDriveClient(settings.google_credentials_file, settings.google_token_file, google_credentials)
     return GoogleDriveSource(drive, settings.google_drive_folder_id)
 

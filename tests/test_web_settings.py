@@ -331,7 +331,7 @@ def test_media_source_page_saves_local_nas_folder(client, tmp_path):
     nas = tmp_path / 'nas'
     nas.mkdir()
     page = client.get('/settings/source')
-    assert page.status_code == 200 and b'Local / NAS folder' in page.data
+    assert page.status_code == 200 and b'Folder mounted on this server' in page.data
     resp = client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': str(nas), 'LOCAL_SOURCE_RECURSIVE': 'on'}, follow_redirects=True)
     assert b'Media source saved' in resp.data
     store = store_for_test()
@@ -380,10 +380,10 @@ def test_setup_check_and_dashboard_use_local_source(client, tmp_path):
     nas.mkdir()
     store_for_test().update({'SOURCE_TYPE': 'local', 'LOCAL_SOURCE_PATH': str(nas)})
     dashboard = client.get('/').data
-    assert b'Local/NAS Folder' in dashboard
+    assert b'Mounted Folder' in dashboard
     assert b'Drive Folder Missing' not in dashboard
     resp = client.post('/setup/test-scan', data={'csrf': csrf(client)}, follow_redirects=True)
-    assert b'Local/NAS Folder' in resp.data
+    assert b'Mounted Folder' in resp.data
     assert b'Folder readable: 0 photo/video file(s) found' in resp.data
 
 
@@ -438,3 +438,76 @@ def test_load_settings_for_local_source_does_not_require_drive_folder(monkeypatc
     assert settings.source_type == 'local'
     assert settings.local_source_path == Path('/mnt/nas/photos')
     assert settings.google_drive_folder_id == ''
+
+
+def test_smb_source_saved_from_pasted_address_and_password_kept_secret(client):
+    browse = patch('drive_to_flickr.web.SMBSource.list_folders', return_value=[])
+    browse.start()
+    resp = client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'smb', 'SMB_SERVER': '\\\\192.168.1.20\\Photos\\Events', 'SMB_SHARE': '', 'SMB_FOLDER': '', 'SMB_USERNAME': 'flickr', 'SMB_PASSWORD': 'nas-secret', 'SMB_RECURSIVE': 'on'}, follow_redirects=True)
+    assert b'Media source saved' in resp.data
+    store = store_for_test()
+    assert (store.get('SOURCE_TYPE'), store.get('SMB_SERVER'), store.get('SMB_SHARE'), store.get('SMB_FOLDER'), store.get('SMB_USERNAME')) == ('smb', '192.168.1.20', 'Photos', 'Events', 'flickr')
+    ss = SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH']))
+    assert ss.get('smb_password') == 'nas-secret'
+    page = client.get('/settings/source')
+    browse.stop()
+    assert b'nas-secret' not in page.data
+    assert b'Saved. Leave blank to keep it' in page.data
+    # Saving again without a password keeps the stored one.
+    client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'smb', 'SMB_SERVER': '192.168.1.20', 'SMB_SHARE': 'Photos', 'SMB_FOLDER': 'Events', 'SMB_USERNAME': 'flickr'})
+    assert SecretStore(Path(__import__('os').environ['SECRET_STORE_PATH'])).get('smb_password') == 'nas-secret'
+
+
+def test_smb_source_validation(client):
+    resp = client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'smb', 'SMB_SERVER': '', 'SMB_SHARE': ''}, follow_redirects=True)
+    assert b'SMB_SERVER is required' in resp.data and b'SMB_SHARE is required' in resp.data
+    resp = client.post('/settings/source', data={'csrf': csrf(client), 'SOURCE_TYPE': 'smb', 'SMB_SERVER': 'nas', 'SMB_SHARE': 'Photos', 'SMB_FOLDER': '../etc'}, follow_redirects=True)
+    assert b"SMB_FOLDER cannot contain" in resp.data
+    assert store_for_test().get('SOURCE_TYPE') == 'google_drive'
+
+
+def test_smb_folder_browser_and_selection(client):
+    store_for_test().update({'SOURCE_TYPE': 'smb', 'SMB_SERVER': 'nas', 'SMB_SHARE': 'Photos'})
+    with patch('drive_to_flickr.web.SMBSource.list_folders', return_value=[{'name': 'Camp Meeting 2026', 'path': 'Events/Camp Meeting 2026'}]) as lf:
+        page = client.get('/settings/source?smb_browse=Events')
+    lf.assert_called_once_with('Events')
+    assert b'Camp Meeting 2026' in page.data
+    with patch('drive_to_flickr.web.SMBSource.list_folders', return_value=[]):
+        resp = client.post('/settings/source/select-smb', data={'csrf': csrf(client), 'path': 'Events/Camp Meeting 2026'}, follow_redirects=True)
+    assert b'Now pulling media from' in resp.data
+    assert store_for_test().get('SMB_FOLDER') == 'Events/Camp Meeting 2026'
+
+
+def test_smb_browser_shows_friendly_error(client):
+    store_for_test().update({'SOURCE_TYPE': 'smb', 'SMB_SERVER': 'nas', 'SMB_SHARE': 'Photos'})
+    with patch('drive_to_flickr.web.SMBSource.list_folders', side_effect=ValueError("Failed to connect to 'nas:445'")):
+        page = client.get('/settings/source')
+    assert b'Could not reach the NAS' in page.data
+
+
+def test_smb_source_test_and_setup_check(client):
+    from drive_to_flickr.models import DriveFile
+    store_for_test().update({'SOURCE_TYPE': 'smb', 'SMB_SERVER': 'nas', 'SMB_SHARE': 'Photos'})
+    files = [DriveFile('smb:a.jpg', 'a.jpg', '', datetime.now(UTC), datetime.now(UTC)), DriveFile('smb:n.txt', 'n.txt', '', datetime.now(UTC), datetime.now(UTC))]
+    with patch('drive_to_flickr.web.SMBSource.list_media_files', return_value=files), patch('drive_to_flickr.web.SMBSource.list_folders', return_value=[]):
+        resp = client.post('/settings/source/test', data={'csrf': csrf(client)}, follow_redirects=True)
+        assert b'Share readable: 1 photo/video file(s) found' in resp.data
+        resp = client.post('/setup/test-scan', data={'csrf': csrf(client)}, follow_redirects=True)
+        assert b'Network Share (SMB)' in resp.data
+    dashboard = client.get('/').data
+    assert b'NAS Share' in dashboard
+
+
+def test_load_settings_for_smb_source(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path)
+    from drive_to_flickr.config import load_settings
+    from drive_to_flickr.main import build_source
+    from drive_to_flickr.sources import SMBSource
+    SettingsStore(Database(tmp_path/'state.sqlite')).update({'SOURCE_TYPE': 'smb', 'SMB_SERVER': 'nas', 'SMB_SHARE': 'Photos', 'SMB_FOLDER': 'Events', 'SMB_USERNAME': 'u', 'SMB_SUCCESS_FOLDER': 'Events/Uploaded'})
+    SecretStore(tmp_path/'secrets.json').set('smb_password', 'pw')
+    settings = load_settings(require_credentials=False)
+    assert (settings.smb_server, settings.smb_share, settings.smb_password, settings.smb_port) == ('nas', 'Photos', 'pw', 445)
+    source = build_source(settings)
+    assert isinstance(source, SMBSource)
+    assert source.auth == {'username': 'u', 'password': 'pw', 'port': 445, 'connection_timeout': 15}
+    assert 'events/uploaded' in source.exclude

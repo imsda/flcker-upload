@@ -26,7 +26,7 @@ from .metadata import detect_media_kind
 from .models import Status
 from .secrets import SecretStore
 from .settings_store import SettingsStore, validate_settings
-from .sources import LocalFolderSource
+from .sources import LocalFolderSource, SMBSource, clean_relative, friendly_smb_error, parse_smb_location
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,12 +62,23 @@ def browse_local(path: str) -> tuple[list[dict[str, str]], str, str | None]:
 def source_configured(vals: dict[str, str]) -> bool:
     if vals.get("SOURCE_TYPE") == "local":
         return bool(vals.get("LOCAL_SOURCE_PATH"))
+    if vals.get("SOURCE_TYPE") == "smb":
+        return bool(vals.get("SMB_SERVER") and vals.get("SMB_SHARE"))
     return bool(vals.get("GOOGLE_DRIVE_FOLDER_ID"))
+
+
+def smb_display(vals: dict[str, str]) -> str:
+    if not (vals.get("SMB_SERVER") and vals.get("SMB_SHARE")):
+        return ""
+    folder = vals.get("SMB_FOLDER", "").strip("/").replace("/", "\\")
+    return "\\\\" + vals["SMB_SERVER"] + "\\" + vals["SMB_SHARE"] + ("\\" + folder if folder else "")
 
 
 def source_name(vals: dict[str, str]) -> str:
     if vals.get("SOURCE_TYPE") == "local":
         return vals.get("LOCAL_SOURCE_PATH") or ""
+    if vals.get("SOURCE_TYPE") == "smb":
+        return smb_display(vals)
     return vals.get("GOOGLE_DRIVE_FOLDER_NAME") or vals.get("GOOGLE_DRIVE_FOLDER_ID") or ""
 
 
@@ -182,7 +193,7 @@ def create_app() -> Flask:
         health = worker_health(vals.get("WORKER_HEARTBEAT", ""), poll_interval, display_timezone=display_timezone)
         return {"vals": vals, "google_connected": google_connected, "flickr_connected": flickr_connected,
                 "drive_connected": bool(vals.get("GOOGLE_DRIVE_FOLDER_ID")), "calendar_connected": bool(vals.get("GOOGLE_CALENDAR_ID")),
-                "source_configured": source_configured(vals), "source_name": source_name(vals), "source_is_local": vals.get("SOURCE_TYPE") == "local",
+                "source_configured": source_configured(vals), "source_name": source_name(vals), "source_is_local": vals.get("SOURCE_TYPE") == "local", "source_type": vals.get("SOURCE_TYPE") or "google_drive",
                 "worker_health": health}
 
     def upload_metrics() -> dict[str, int]:
@@ -202,8 +213,9 @@ def create_app() -> Flask:
         warnings = []
         if not google_oauth_configured(secret_store, settings.google_credentials_file): warnings.append({"title": "Google OAuth Not Configured", "message": "Google OAuth not configured", "detail": "Add your Google OAuth Client ID and Client Secret before connecting Google services.", "action": "Configure OAuth", "href": url_for("google_account")})
         if not d["google_connected"]: warnings.append({"title": "Google Account Not Connected", "message": "Google account is not connected.", "detail": "Connect a Google account to browse shared Drive folders and Calendars.", "action": "Connect Google", "href": url_for("google_account")})
+        if vals.get("SOURCE_TYPE") == "smb" and not d["source_configured"]: warnings.append({"title": "Network Share Missing", "message": "No NAS share has been set.", "detail": "Enter the NAS server, share name and login so Drive to Flickr can read new media.", "action": "Set Media Source", "href": url_for("source_page")})
         if d["source_is_local"] and not vals.get("LOCAL_SOURCE_PATH"): warnings.append({"title": "Local Folder Missing", "message": "No local/NAS folder has been set.", "detail": "Enter the mounted NAS folder that Drive to Flickr should watch for new media.", "action": "Set Media Source", "href": url_for("source_page")})
-        if not d["source_is_local"] and not vals.get("GOOGLE_DRIVE_FOLDER_ID"): warnings.append({"title": "Drive Folder Missing", "message": "No Google Drive folder has been selected.", "detail": "Choose the Drive folder that Drive to Flickr should watch for new media.", "action": "Select Drive Folder", "href": url_for("drive_page")})
+        if d["source_type"] == "google_drive" and not vals.get("GOOGLE_DRIVE_FOLDER_ID"): warnings.append({"title": "Drive Folder Missing", "message": "No Google Drive folder has been selected.", "detail": "Choose the Drive folder that Drive to Flickr should watch for new media.", "action": "Select Drive Folder", "href": url_for("drive_page")})
         if not vals.get("GOOGLE_CALENDAR_ID"): warnings.append({"title": "Calendar Missing", "message": "No Calendar has been selected.", "detail": "Select the Google Calendar used to map capture times to Flickr albums.", "action": "Select Calendar", "href": url_for("calendar_page")})
         if not d["flickr_connected"]: warnings.append({"title": "Flickr Disconnected", "message": "Flickr has not been connected.", "detail": "Connect Flickr so processed Drive media can be published to albums.", "action": "Connect Flickr", "href": url_for("flickr_page")})
         if d["worker_health"]["status"] != "Running": warnings.append({"title": "Publisher Worker " + d["worker_health"]["status"], "message": "The publisher worker is not reporting as running.", "detail": "Start or restart the drive-to-flickr worker service. " + d["worker_health"]["detail"], "action": "", "href": ""})
@@ -278,24 +290,74 @@ def create_app() -> Flask:
     @login_required
     def source_page():
         if request.method == "POST":
+            server, share, folder = request.form.get("SMB_SERVER", "").strip(), request.form.get("SMB_SHARE", "").strip(), request.form.get("SMB_FOLDER", "").strip()
+            if server.lower().startswith("smb://") or server.startswith(("\\\\", "//")):
+                # Accept a pasted address like smb://nas/Photos/Events or \\nas\Photos\Events.
+                server, pasted_share, pasted_folder = parse_smb_location(server)
+                share, folder = share or pasted_share, folder or pasted_folder
             vals = {
                 "SOURCE_TYPE": request.form.get("SOURCE_TYPE", "google_drive"),
                 "LOCAL_SOURCE_PATH": request.form.get("LOCAL_SOURCE_PATH", "").strip(),
                 "LOCAL_SOURCE_RECURSIVE": "true" if request.form.get("LOCAL_SOURCE_RECURSIVE") else "false",
                 "LOCAL_SUCCESS_FOLDER": request.form.get("LOCAL_SUCCESS_FOLDER", "").strip(),
                 "LOCAL_FAILED_FOLDER": request.form.get("LOCAL_FAILED_FOLDER", "").strip(),
+                "SMB_SERVER": server,
+                "SMB_SHARE": share,
+                "SMB_FOLDER": folder,
+                "SMB_USERNAME": request.form.get("SMB_USERNAME", "").strip(),
+                "SMB_PORT": request.form.get("SMB_PORT", "").strip() or "445",
+                "SMB_RECURSIVE": "true" if request.form.get("SMB_RECURSIVE") else "false",
+                "SMB_SUCCESS_FOLDER": request.form.get("SMB_SUCCESS_FOLDER", "").strip(),
+                "SMB_FAILED_FOLDER": request.form.get("SMB_FAILED_FOLDER", "").strip(),
             }
             errs = validate_settings(store.all_public() | vals)
             if errs:
                 flash("; ".join(errs), "error")
             else:
+                for key in ("SMB_FOLDER", "SMB_SUCCESS_FOLDER", "SMB_FAILED_FOLDER"):
+                    vals[key] = clean_relative(vals[key])
                 store.update(vals)
+                if request.form.get("SMB_PASSWORD"):
+                    secret_store.set("smb_password", request.form["SMB_PASSWORD"])
                 flash("Media source saved. The worker uses it from its next scan.", "success")
             return redirect(url_for("source_page"))
         vals = store.all_public()
         browse_path = request.args.get("browse") or vals.get("LOCAL_SOURCE_PATH") or default_browse_path()
         local_dirs, browse_error, browse_parent = browse_local(browse_path)
-        return render_template("settings/source.html", vals=vals, browse_path=browse_path, local_dirs=local_dirs, browse_error=browse_error, browse_parent=browse_parent)
+        smb_browse = clean_relative(request.args.get("smb_browse", "")) if ".." not in request.args.get("smb_browse", "") else ""
+        smb_dirs: list[dict[str, str]] = []
+        smb_error = ""
+        if vals.get("SOURCE_TYPE") == "smb" and vals.get("SMB_SERVER") and vals.get("SMB_SHARE"):
+            try:
+                smb_dirs = smb_source(vals).list_folders(smb_browse)
+            except Exception as exc:
+                app.logger.warning("Unable to browse SMB share: %s", exc)
+                smb_error = friendly_smb_error(exc)
+        smb_parent = smb_browse.rsplit("/", 1)[0] if "/" in smb_browse else ("" if smb_browse else None)
+        return render_template("settings/source.html", vals=vals, browse_path=browse_path, local_dirs=local_dirs, browse_error=browse_error, browse_parent=browse_parent,
+                               smb_browse=smb_browse, smb_dirs=smb_dirs, smb_error=smb_error, smb_parent=smb_parent, smb_display=smb_display(vals), has_smb_password=secret_store.has("smb_password"))
+
+    def smb_source(vals: dict[str, str]) -> SMBSource:
+        return SMBSource(vals.get("SMB_SERVER", ""), vals.get("SMB_SHARE", ""), vals.get("SMB_FOLDER", ""), username=vals.get("SMB_USERNAME", ""), password=secret_store.get("smb_password"), port=int(vals.get("SMB_PORT") or 445), recursive=vals.get("SMB_RECURSIVE") != "false", exclude=(vals.get("SMB_SUCCESS_FOLDER", ""), vals.get("SMB_FAILED_FOLDER", "")))
+
+    def check_smb_source(vals: dict[str, str]) -> str:
+        media = [f for f in smb_source(vals).list_media_files() if detect_media_kind(Path(f.name)) is not None]
+        return f"Share readable: {len(media)} photo/video file(s) found in {smb_display(vals)}"
+
+    @app.post("/settings/source/select-smb")
+    @login_required
+    def source_select_smb():
+        try:
+            folder = clean_relative(request.form.get("path", ""))
+        except ValueError as exc:
+            flash(str(exc), "error"); return redirect(url_for("source_page"))
+        vals = {"SOURCE_TYPE": "smb", "SMB_FOLDER": folder}
+        errs = validate_settings(store.all_public() | vals)
+        if errs:
+            flash("; ".join(errs), "error"); return redirect(url_for("source_page"))
+        store.update(vals)
+        flash("Now pulling media from " + smb_display(store.all_public()), "success")
+        return redirect(url_for("source_page", smb_browse=folder))
 
     @app.post("/settings/source/select-local")
     @login_required
@@ -323,12 +385,22 @@ def create_app() -> Flask:
                 if not vals.get("LOCAL_SOURCE_PATH"):
                     raise ValueError("No local/NAS folder has been set.")
                 flash(check_local_source(vals), "success")
+            elif vals.get("SOURCE_TYPE") == "smb":
+                if not (vals.get("SMB_SERVER") and vals.get("SMB_SHARE")):
+                    raise ValueError("Enter the NAS server and share name, then save.")
+                flash(check_smb_source(vals), "success")
             else:
                 meta = test_folder(secret_store, vals.get("GOOGLE_DRIVE_FOLDER_ID", ""))
                 flash("Drive folder accessible: " + meta.get("name", ""), "success")
         except Exception as exc:
             app.logger.warning("Media source check failed: %s", exc)
-            flash(friendly_google_error(exc) if vals.get("SOURCE_TYPE") != "local" else str(exc), "error")
+            if vals.get("SOURCE_TYPE") == "smb":
+                message = friendly_smb_error(exc)
+            elif vals.get("SOURCE_TYPE") == "local":
+                message = str(exc)
+            else:
+                message = friendly_google_error(exc)
+            flash(message, "error")
         return redirect(url_for("source_page"))
 
     @app.get("/settings/google-account")
@@ -550,11 +622,20 @@ def create_app() -> Flask:
             results.append({"name": "Google Account", "ok": False, "detail": "Connect a Google account first."})
 
         folder_id = vals.get("GOOGLE_DRIVE_FOLDER_ID", "")
-        if vals.get("SOURCE_TYPE") == "local":
-            if vals.get("LOCAL_SOURCE_PATH"):
-                check("Local/NAS Folder", lambda: check_local_source(vals), lambda detail: detail)
+        if vals.get("SOURCE_TYPE") == "smb":
+            if vals.get("SMB_SERVER") and vals.get("SMB_SHARE"):
+                try:
+                    results.append({"name": "Network Share (SMB)", "ok": True, "detail": check_smb_source(vals)})
+                except Exception as exc:
+                    app.logger.warning("Setup check failed for SMB: %s", exc)
+                    results.append({"name": "Network Share (SMB)", "ok": False, "detail": friendly_smb_error(exc)})
             else:
-                results.append({"name": "Local/NAS Folder", "ok": False, "detail": "Set a local/NAS folder first."})
+                results.append({"name": "Network Share (SMB)", "ok": False, "detail": "Enter the NAS server and share first."})
+        elif vals.get("SOURCE_TYPE") == "local":
+            if vals.get("LOCAL_SOURCE_PATH"):
+                check("Mounted Folder", lambda: check_local_source(vals), lambda detail: detail)
+            else:
+                results.append({"name": "Mounted Folder", "ok": False, "detail": "Set a local/NAS folder first."})
         elif folder_id:
             check("Google Drive", lambda: test_folder(secret_store, folder_id), lambda meta: f"Folder accessible: {meta.get('name', folder_id)}")
         else:

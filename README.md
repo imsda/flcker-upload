@@ -1,10 +1,10 @@
 # drive-to-flickr
 
-`drive-to-flickr` is a production-oriented Python 3.12+ Linux service that polls a configured Google Drive folder **or a local/NAS folder**, downloads supported photo/video files, determines their capture time, matches that time against a dedicated Google Calendar, uploads the media to Flickr, and assigns it to a Flickr album/photoset.
+`drive-to-flickr` is a production-oriented Python 3.12+ Linux service that polls a configured Google Drive folder **or a NAS share** (directly over SMB, or a mounted folder), downloads supported photo/video files, determines their capture time, matches that time against a dedicated Google Calendar, uploads the media to Flickr, and assigns it to a Flickr album/photoset.
 
 ## Architecture
 
-The service is split into modules: `config` validates environment settings, `database` owns SQLite state, `sources` abstracts where media comes from (Google Drive or a local/NAS folder), `drive` uses the official Google Drive API, `calendar` uses the official Google Calendar API, `metadata` shells out to ExifTool, `matcher` parses event descriptions and selects albums, `flickr` calls Flickr REST/upload APIs directly with OAuth 1.0a, and `processor` coordinates the idempotent pipeline.
+The service is split into modules: `config` validates environment settings, `database` owns SQLite state, `sources` abstracts where media comes from (Google Drive, an SMB network share, or a mounted folder), `drive` uses the official Google Drive API, `calendar` uses the official Google Calendar API, `metadata` shells out to ExifTool, `matcher` parses event descriptions and selects albums, `flickr` calls Flickr REST/upload APIs directly with OAuth 1.0a, and `processor` coordinates the idempotent pipeline.
 
 ## API implementation decision
 
@@ -29,29 +29,46 @@ The worker records a heartbeat in the application database while it runs. The da
 
 The UI stores normal settings in SQLite and stores OAuth/API secrets separately in a filesystem-protected secret file. OAuth tokens are never displayed in HTML or JSON responses. Existing `GOOGLE_DRIVE_FOLDER_ID` and `GOOGLE_CALENDAR_ID` environment variables are still honored/imported for backward compatibility.
 
-## Choosing the media source: Google Drive or a local NAS
+## Choosing the media source: Google Drive or a NAS
 
 Open **Settings → Source** and pick where media is pulled from:
 
 * **Google Drive folder** (default): choose the folder on the Drive page.
-* **Local / NAS folder**: the worker reads photos and videos straight from a folder on the server, such as a mounted NAS share. Files are read in place rather than copied to the staging area, and subfolders are included unless you untick **Include subfolders**. Hidden files and NAS metadata folders such as Synology's `@eaDir` are skipped.
+* **NAS network share (SMB)**: the app connects to the NAS itself. Nothing needs to be mounted on the server. Recommended for Ugreen, Synology, QNAP, TrueNAS and Windows shares.
+* **Folder mounted on this server**: for shares you mount yourself, for example NFS.
 
 The Calendar still comes from Google either way, so a Google account must be connected even when the source is a NAS.
 
-To use a NAS, mount the share on the server first. Example `/etc/fstab` lines:
+### NAS network share (SMB)
+
+1. On the NAS, make sure SMB is enabled. On a Ugreen NAS this is under Control Panel → File Service → SMB, and it is on by default.
+2. Create or pick a NAS user for the uploader. Give it **read** access to the shared folder, or **read/write** if files should be moved after upload.
+3. In **Settings → Source**, choose **NAS network share (SMB)** and enter:
+   * **NAS server**: the NAS IP address or host name, for example `192.168.1.20`. You can also paste a full address such as `\\192.168.1.20\Photos\Events` or `smb://nas/Photos`; it is split into server, share and folder for you.
+   * **Shared folder**: the share name, for example `Photos`.
+   * **Folder inside the share** (optional): leave blank for the whole share.
+   * **Username / Password**: the NAS account. The password is stored in the protected secret store, never in the database, and is never shown again.
+4. Click **Save Source**. The **Share Folder Browser** then lists the share's folders. Click **Use this folder** to pick the watched folder.
+5. Click **Test Source** to confirm the app can read the share and see how many photos and videos it found.
+
+Files are copied into the staging area for processing and deleted afterwards, the same as Google Drive files. Subfolders are included unless you untick **Include subfolders**. Hidden files and NAS housekeeping folders (`@eaDir`, `#recycle`, `.ugreen…` and similar) are skipped. To move files after upload, set **General → After successful upload** to `move` and fill in **Move uploaded files to** with a folder path inside the same share, for example `Photos-Uploaded`. A move-to folder inside the watched folder is excluded from scanning.
+
+The server must be able to reach the NAS on TCP port 445. Connections time out after 15 seconds, and the error says whether the NAS was unreachable, the login was rejected, or the share or folder does not exist.
+
+Each file is identified by its path relative to the watched folder. Renaming or moving a file inside the share makes it look new.
+
+### Folder mounted on this server
+
+If you prefer to mount the share yourself, for example over NFS, mount it on the server and choose **Folder mounted on this server**. Example `/etc/fstab` lines:
 
 ```text
-# SMB/CIFS (Synology, QNAP, Windows shares). Keep credentials in a 0600 file.
+# SMB/CIFS. Keep credentials in a 0600 file.
 //nas.local/photos  /mnt/nas/photos  cifs  credentials=/etc/drive-to-flickr/nas-credentials,uid=flickruploader,gid=flickruploader,ro,_netdev,nofail  0  0
 # NFS
 nas.local:/volume1/photos  /mnt/nas/photos  nfs  ro,_netdev,nofail  0  0
 ```
 
-Then enter `/mnt/nas/photos` on the Source page, or browse to it and click **Use this folder**. Click **Test Source** to confirm the service can read it and see how many photos and videos it found.
-
-If the share is unmounted, scans log an error and nothing is marked as processed, so files are picked up once the share is back. Each file is identified by its path relative to the source folder. Renaming or moving a file inside the share makes it look new.
-
-**Moving files after upload.** To move uploaded files out of the watched folder, set **General → After successful upload** to `move` and fill in **Move uploaded files to** on the Source page. A move-to folder inside the watched folder is excluded from scanning. Moving needs a read-write mount (drop `ro` above), and the systemd unit must be allowed to write there:
+Enter `/mnt/nas/photos` on the Source page, or browse to it and click **Use this folder**. Files are read in place. Moving files after upload needs a read-write mount, and the systemd unit must be allowed to write there:
 
 ```bash
 sudo systemctl edit drive-to-flickr
@@ -59,8 +76,6 @@ sudo systemctl edit drive-to-flickr
 # [Service]
 # ReadWritePaths=/mnt/nas/photos /mnt/nas/photos-uploaded
 ```
-
-Read-only access works with the shipped unit unchanged.
 
 ## Minimal bootstrap settings
 
@@ -159,7 +174,7 @@ Start the web UI with `drive-to-flickr web` or `drive-to-flickr-web` (served by 
 ## Running manually
 
 ```bash
-drive-to-flickr test-source      # lists files in the configured Drive or local/NAS folder (alias: test-drive)
+drive-to-flickr test-source      # lists files in the configured Drive folder, SMB share or mounted folder (alias: test-drive)
 drive-to-flickr test-calendar '2026-06-04T19:42:00-05:00'
 drive-to-flickr test-flickr
 drive-to-flickr scan

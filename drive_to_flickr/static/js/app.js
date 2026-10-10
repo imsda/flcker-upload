@@ -47,3 +47,15 @@ document.querySelectorAll('[data-folder-toolbar]').forEach((toolbar) => {
     search.focus();
   });
 });
+
+const sourceChoices = document.querySelectorAll('[data-source-choice]');
+if (sourceChoices.length) {
+  const showSourcePanels = () => {
+    const selected = document.querySelector('[data-source-choice]:checked')?.value;
+    document.querySelectorAll('[data-source-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.sourcePanel !== selected;
+    });
+  };
+  sourceChoices.forEach((choice) => choice.addEventListener('change', showSourcePanels));
+  showSourcePanels();
+}

@@ -171,11 +171,15 @@ class Processor:
     def _success_destination(self) -> str | None:
         if self.settings.source_type == "local":
             return str(self.settings.local_success_folder) if self.settings.local_success_folder else None
+        if self.settings.source_type == "smb":
+            return self.settings.smb_success_folder or None
         return self.settings.drive_success_folder
 
     def _failed_destination(self) -> str | None:
         if self.settings.source_type == "local":
             return str(self.settings.local_failed_folder) if self.settings.local_failed_folder else None
+        if self.settings.source_type == "smb":
+            return self.settings.smb_failed_folder or None
         return self.settings.drive_failed_folder
 
     def _move(self, drive_file: DriveFile, destination: str | None) -> None:

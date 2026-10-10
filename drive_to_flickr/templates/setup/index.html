@@ -13,7 +13,7 @@
     <p>Complete each required connection before finishing. OAuth Callback URL: <code>{{ callback }}</code></p>
     <div class="grid cards">
       <article class="metric"><span>Google</span><strong>{{ 'Connected' if google_connected else 'Not connected' }}</strong></article>
-      <article class="metric"><span>{{ 'Local/NAS Folder' if vals.get('SOURCE_TYPE') == 'local' else 'Drive' }}</span><strong>{{ source_name or 'Not selected' }}</strong></article>
+      <article class="metric"><span>{{ {'local': 'Mounted Folder', 'smb': 'NAS Share'}.get(vals.get('SOURCE_TYPE'), 'Drive') }}</span><strong>{{ source_name or 'Not selected' }}</strong></article>
       <article class="metric"><span>Calendar</span><strong>{{ vals.get('GOOGLE_CALENDAR_NAME') or 'Not selected' }}</strong></article>
       <article class="metric"><span>Flickr</span><strong>{{ 'Connected' if flickr_connected else 'Not connected' }}</strong></article>
     </div>

@@ -16,7 +16,7 @@ except ModuleNotFoundError:
 VALID_PRIVACY = {"public", "private", "friends", "family", "friends-and-family"}
 VALID_NO_EVENT = {"unassigned", "skip", "manual-review"}
 VALID_DRIVE_ACTION = {"leave", "move"}
-VALID_SOURCE_TYPES = {"google_drive", "local"}
+VALID_SOURCE_TYPES = {"google_drive", "local", "smb"}
 MAX_WORKER_CONCURRENCY = 8
 
 LOGGER = logging.getLogger(__name__)
@@ -63,6 +63,15 @@ class Settings:
     local_success_folder: Path | None = None
     local_failed_folder: Path | None = None
     worker_concurrency: int = 1
+    smb_server: str = ""
+    smb_share: str = ""
+    smb_folder: str = ""
+    smb_username: str = ""
+    smb_password: str = ""
+    smb_port: int = 445
+    smb_recursive: bool = True
+    smb_success_folder: str = ""
+    smb_failed_folder: str = ""
 
 
 def _bool(value: str | None, default: bool = False) -> bool:
@@ -100,6 +109,7 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
             "FLICKR_API_SECRET": ss.get("flickr_api_secret"),
             "FLICKR_OAUTH_TOKEN": ss.get("flickr_oauth_token"),
             "FLICKR_OAUTH_TOKEN_SECRET": ss.get("flickr_oauth_token_secret"),
+            "SMB_PASSWORD": ss.get("smb_password"),
         }
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Could not read stored settings from %s; using environment only: %s", db_path, exc)
@@ -114,7 +124,7 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         raise ValueError("TIMEZONE is not a valid IANA timezone") from exc
     source_type = cfg("SOURCE_TYPE", "google_drive")
     if source_type not in VALID_SOURCE_TYPES:
-        raise ValueError("SOURCE_TYPE must be google_drive or local")
+        raise ValueError("SOURCE_TYPE must be google_drive, local, or smb")
 
     def optional_path(name: str) -> Path | None:
         value = cfg(name).strip()
@@ -164,6 +174,15 @@ def load_settings(env_file: Path | None = None, *, require_credentials: bool = T
         local_success_folder=optional_path("LOCAL_SUCCESS_FOLDER"),
         local_failed_folder=optional_path("LOCAL_FAILED_FOLDER"),
         worker_concurrency=max(1, min(MAX_WORKER_CONCURRENCY, int(cfg("WORKER_CONCURRENCY", "1")))),
+        smb_server=required("SMB_SERVER", needed=source_type == "smb"),
+        smb_share=required("SMB_SHARE", needed=source_type == "smb"),
+        smb_folder=cfg("SMB_FOLDER"),
+        smb_username=cfg("SMB_USERNAME"),
+        smb_password=cfg("SMB_PASSWORD"),
+        smb_port=int(cfg("SMB_PORT", "445")),
+        smb_recursive=_bool(cfg("SMB_RECURSIVE", "true"), True),
+        smb_success_folder=cfg("SMB_SUCCESS_FOLDER"),
+        smb_failed_folder=cfg("SMB_FAILED_FOLDER"),
     )
     if require_credentials and source_type == "local" and settings.local_source_path is None:
         raise ValueError("Missing required setting: LOCAL_SOURCE_PATH")

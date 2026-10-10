@@ -15,6 +15,7 @@ SECRET_KEYS = {
     "flickr_oauth_token",
     "flickr_oauth_token_secret",
     "flickr_request_token_secret",
+    "smb_password",
 }
 
 
