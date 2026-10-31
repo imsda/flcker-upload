@@ -34,10 +34,19 @@ def _stop(signum: int, frame: object) -> None:
     STOP = True
 
 
-def _heartbeat_loop(store: SettingsStore, stopped: threading.Event) -> None:
-    record_worker_heartbeat(store)
-    while not stopped.wait(HEARTBEAT_INTERVAL_SECONDS):
+def _beat(store: SettingsStore) -> None:
+    try:
         record_worker_heartbeat(store)
+    except Exception:  # noqa: BLE001
+        # One failed write (e.g. the database stayed locked) must not kill the thread,
+        # or the dashboard shows the worker as Stale while it is still uploading.
+        LOGGER.exception("Could not record worker heartbeat; will try again")
+
+
+def _heartbeat_loop(store: SettingsStore, stopped: threading.Event) -> None:
+    _beat(store)
+    while not stopped.wait(HEARTBEAT_INTERVAL_SECONDS):
+        _beat(store)
 
 
 def google_credentials_for(settings: Settings):
