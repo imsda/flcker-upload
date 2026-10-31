@@ -124,6 +124,15 @@ def test_worker_heartbeat_loop_continues_during_long_scan():
     record.assert_called_with(store)
 
 
+def test_worker_heartbeat_loop_survives_failed_write():
+    store = Mock()
+    stopped = Mock()
+    stopped.wait.side_effect = [False, False, True]
+    with patch('drive_to_flickr.main.record_worker_heartbeat', side_effect=[RuntimeError("database is locked"), None, None]) as record:
+        _heartbeat_loop(store, stopped)
+    assert record.call_count == 3
+
+
 def test_google_clients_accept_web_oauth_credentials(tmp_path: Path):
     supplied_credentials = Mock()
     with patch('drive_to_flickr.drive.Credentials.from_authorized_user_file') as drive_legacy, \
